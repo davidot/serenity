@@ -1,6 +1,7 @@
 /*
  * Copyright (c) 2020, Stephan Unverwerth <s.unverwerth@serenityos.org>
  * Copyright (c) 2020-2021, Linus Groh <linusg@serenityos.org>
+ * Copyright (c) 2021, David Tuin <david.tuin@gmail.com>
  *
  * SPDX-License-Identifier: BSD-2-Clause
  */
@@ -1545,6 +1546,36 @@ NonnullRefPtr<Expression> Parser::parse_secondary_expression(NonnullRefPtr<Expre
     }
 }
 
+RefPtr<BindingPattern> Parser::synthesize_binding_pattern(Expression const& expression)
+{
+    VERIFY(is<ArrayExpression>(expression) || is<ObjectExpression>(expression));
+    // Clear any syntax error that has occurred in the range that 'expression' spans.
+    m_state.errors.remove_all_matching([range = expression.source_range()](auto const& error) {
+        return error.position.has_value() && range.contains(*error.position);
+    });
+    // Make a parser and parse the source for this expression as a binding pattern.
+    auto source = m_state.lexer.source().substring_view(expression.source_range().start.offset - 2, expression.source_range().end.offset - expression.source_range().start.offset);
+    Lexer lexer { source, m_state.lexer.filename(), expression.source_range().start.line, expression.source_range().start.column };
+    Parser parser { lexer };
+
+    parser.m_state.strict_mode = m_state.strict_mode;
+    parser.m_state.allow_super_property_lookup = m_state.allow_super_property_lookup;
+    parser.m_state.allow_super_constructor_call = m_state.allow_super_constructor_call;
+    parser.m_state.in_function_context = m_state.in_function_context;
+    parser.m_state.in_formal_parameter_context = m_state.in_formal_parameter_context;
+    parser.m_state.in_generator_function_context = m_state.in_generator_function_context;
+    parser.m_state.in_arrow_function_context = m_state.in_arrow_function_context;
+    parser.m_state.in_break_context = m_state.in_break_context;
+    parser.m_state.in_continue_context = m_state.in_continue_context;
+    parser.m_state.string_legacy_octal_escape_sequence_in_scope = m_state.string_legacy_octal_escape_sequence_in_scope;
+    parser.m_state.in_class_field_initializer = m_state.in_class_field_initializer;
+
+    auto result = parser.parse_binding_pattern();
+    if (parser.has_errors())
+        m_state.errors.extend(parser.errors());
+    return result;
+}
+
 NonnullRefPtr<AssignmentExpression> Parser::parse_assignment_expression(AssignmentOp assignment_op, NonnullRefPtr<Expression> lhs, int min_precedence, Associativity associativity)
 {
     auto rule_start = push_start();
@@ -1567,33 +1598,6 @@ NonnullRefPtr<AssignmentExpression> Parser::parse_assignment_expression(Assignme
     consume();
 
     if (assignment_op == AssignmentOp::Assignment) {
-        auto synthesize_binding_pattern = [this](Expression const& expression) -> RefPtr<BindingPattern> {
-            // Clear any syntax error that has occurred in the range that 'expression' spans.
-            m_state.errors.remove_all_matching([range = expression.source_range()](auto const& error) {
-                return error.position.has_value() && range.contains(*error.position);
-            });
-            // Make a parser and parse the source for this expression as a binding pattern.
-            auto source = m_state.lexer.source().substring_view(expression.source_range().start.offset - 2, expression.source_range().end.offset - expression.source_range().start.offset);
-            Lexer lexer { source, m_state.lexer.filename(), expression.source_range().start.line, expression.source_range().start.column };
-            Parser parser { lexer };
-
-            parser.m_state.strict_mode = m_state.strict_mode;
-            parser.m_state.allow_super_property_lookup = m_state.allow_super_property_lookup;
-            parser.m_state.allow_super_constructor_call = m_state.allow_super_constructor_call;
-            parser.m_state.in_function_context = m_state.in_function_context;
-            parser.m_state.in_formal_parameter_context = m_state.in_formal_parameter_context;
-            parser.m_state.in_generator_function_context = m_state.in_generator_function_context;
-            parser.m_state.in_arrow_function_context = m_state.in_arrow_function_context;
-            parser.m_state.in_break_context = m_state.in_break_context;
-            parser.m_state.in_continue_context = m_state.in_continue_context;
-            parser.m_state.string_legacy_octal_escape_sequence_in_scope = m_state.string_legacy_octal_escape_sequence_in_scope;
-            parser.m_state.in_class_field_initializer = m_state.in_class_field_initializer;
-
-            auto result = parser.parse_binding_pattern();
-            if (parser.has_errors())
-                m_state.errors.extend(parser.errors());
-            return result;
-        };
         if (is<ArrayExpression>(*lhs) || is<ObjectExpression>(*lhs)) {
             auto binding_pattern = synthesize_binding_pattern(*lhs);
             if (binding_pattern) {
@@ -1919,7 +1923,7 @@ Vector<FunctionNode::Parameter> Parser::parse_formal_parameters(int& function_le
     Vector<FunctionNode::Parameter> parameters;
 
     auto consume_identifier_or_binding_pattern = [&]() -> Variant<FlyString, NonnullRefPtr<BindingPattern>> {
-        if (auto pattern = parse_binding_pattern(true))
+        if (auto pattern = parse_binding_pattern(true, false))
             return pattern.release_nonnull();
 
         auto token = consume_identifier();
@@ -2003,7 +2007,7 @@ Vector<FunctionNode::Parameter> Parser::parse_formal_parameters(int& function_le
 
 static constexpr AK::Array<StringView, 36> s_reserved_words = { "break", "case", "catch", "class", "const", "continue", "debugger", "default", "delete", "do", "else", "enum", "export", "extends", "false", "finally", "for", "function", "if", "import", "in", "instanceof", "new", "null", "return", "super", "switch", "this", "throw", "true", "try", "typeof", "var", "void", "while", "with" };
 
-RefPtr<BindingPattern> Parser::parse_binding_pattern(bool strict_checks)
+RefPtr<BindingPattern> Parser::parse_binding_pattern(bool strict_checks, bool allow_member_expression)
 {
     auto rule_start = push_start();
 
@@ -2042,10 +2046,48 @@ RefPtr<BindingPattern> Parser::parse_binding_pattern(bool strict_checks)
         RefPtr<Expression> initializer = {};
 
         if (is_object) {
-            if (match_identifier_name()) {
-                name = create_ast_node<Identifier>(
-                    { m_state.current_token.filename(), rule_start.position(), position() },
-                    consume().value());
+            if (allow_member_expression && is_rest) {
+                auto expression_position = position();
+                auto expression = parse_expression(2, Associativity::Right, { TokenType::Equals });
+                if (is<MemberExpression>(*expression))
+                    alias = static_ptr_cast<MemberExpression>(expression);
+                else if (is<Identifier>(*expression))
+                    name = static_ptr_cast<Identifier>(expression);
+                else
+                    syntax_error("Invalid destructuring assignment target", expression_position);
+            } else if (match_identifier_name() || match(TokenType::StringLiteral) || match(TokenType::NumericLiteral)) {
+                if (match(TokenType::StringLiteral)) {
+                    auto token = consume(TokenType::StringLiteral);
+                    auto status = Token::StringValueStatus::Ok;
+                    auto string = token.string_value(status);
+                    if (status != Token::StringValueStatus::Ok) {
+                        String message;
+                        if (status == Token::StringValueStatus::LegacyOctalEscapeSequence) {
+                            m_state.string_legacy_octal_escape_sequence_in_scope = true;
+                            if (m_state.strict_mode)
+                                message = "Octal escape sequence in string literal not allowed in strict mode";
+                        } else if (status == Token::StringValueStatus::MalformedHexEscape || status == Token::StringValueStatus::MalformedUnicodeEscape) {
+                            auto type = status == Token::StringValueStatus::MalformedUnicodeEscape ? "unicode" : "hexadecimal";
+                            message = String::formatted("Malformed {} escape sequence", type);
+                        } else if (status == Token::StringValueStatus::UnicodeEscapeOverflow) {
+                            message = "Unicode code_point must not be greater than 0x10ffff in escape sequence";
+                        } else {
+                            VERIFY_NOT_REACHED();
+                        }
+
+                        if (!message.is_empty())
+                            syntax_error(message, Position { token.line_number(), token.line_column() });
+                    }
+
+                    name = create_ast_node<Identifier>(
+                        { m_state.current_token.filename(), rule_start.position(), position() },
+                        string);
+                } else {
+                    name = create_ast_node<Identifier>(
+                        { m_state.current_token.filename(), rule_start.position(), position() },
+                        consume().value());
+                }
+
             } else if (match(TokenType::BracketOpen)) {
                 consume();
                 auto expression = parse_expression(0);
@@ -2062,15 +2104,31 @@ RefPtr<BindingPattern> Parser::parse_binding_pattern(bool strict_checks)
 
             if (!is_rest && match(TokenType::Colon)) {
                 consume();
-                if (match(TokenType::CurlyOpen) || match(TokenType::BracketOpen)) {
-                    auto binding_pattern = parse_binding_pattern(strict_checks);
+                if (allow_member_expression) {
+                    auto expression_position = position();
+                    auto expression = parse_expression(2, Associativity::Right, { TokenType::Equals });
+                    if (is<ArrayExpression>(*expression) || is<ObjectExpression>(*expression)) {
+                        if (auto synthesized_binding_pattern = synthesize_binding_pattern(*expression))
+                            alias = synthesized_binding_pattern.release_nonnull();
+                        else
+                            syntax_error("Invalid destructuring assignment target", expression_position);
+                    } else if (is<MemberExpression>(*expression)) {
+                        alias = static_ptr_cast<MemberExpression>(expression);
+                    } else if (is<Identifier>(*expression)) {
+                        alias = static_ptr_cast<Identifier>(expression);
+                    } else {
+                        syntax_error("Invalid destructuring assignment target", expression_position);
+                    }
+                } else if (match(TokenType::CurlyOpen) || match(TokenType::BracketOpen)) {
+                    auto binding_pattern = parse_binding_pattern(strict_checks, allow_member_expression);
                     if (!binding_pattern)
                         return {};
                     alias = binding_pattern.release_nonnull();
                 } else if (match_identifier_name()) {
                     alias = create_ast_node<Identifier>(
                         { m_state.current_token.filename(), rule_start.position(), position() },
-                        consume_identifier().value());
+                        consume().value());
+
                     if (strict_checks && match(TokenType::BracketOpen))
                         syntax_error("Illegal property in declaration context");
                 } else {
@@ -2079,7 +2137,30 @@ RefPtr<BindingPattern> Parser::parse_binding_pattern(bool strict_checks)
                 }
             }
         } else {
-            if (match_identifier_name()) {
+            if (allow_member_expression) {
+                auto expression_position = position();
+                auto expression = parse_expression(2, Associativity::Right, { TokenType::Equals });
+
+                if (is<ArrayExpression>(*expression) || is<ObjectExpression>(*expression)) {
+                    if (auto synthesized_binding_pattern = synthesize_binding_pattern(*expression))
+                        alias = synthesized_binding_pattern.release_nonnull();
+                    else
+                        syntax_error("Invalid destructuring assignment target", expression_position);
+                } else if (is<MemberExpression>(*expression)) {
+                    alias = static_ptr_cast<MemberExpression>(expression);
+                } else if (is<Identifier>(*expression)) {
+                    alias = static_ptr_cast<Identifier>(expression);
+                } else {
+                    syntax_error("Invalid destructuring assignment target", expression_position);
+                }
+            } else if (match(TokenType::BracketOpen) || match(TokenType::CurlyOpen)) {
+                auto pattern = parse_binding_pattern(strict_checks, allow_member_expression);
+                if (!pattern) {
+                    expected("binding pattern");
+                    return {};
+                }
+                alias = pattern.release_nonnull();
+            } else if (match_identifier_name()) {
                 // BindingElement must always have an Empty name field
                 auto identifier_name = consume_identifier().value();
                 alias = create_ast_node<Identifier>(
@@ -2094,13 +2175,6 @@ RefPtr<BindingPattern> Parser::parse_binding_pattern(bool strict_checks)
                         }
                     }
                 }
-            } else if (match(TokenType::BracketOpen) || match(TokenType::CurlyOpen)) {
-                auto pattern = parse_binding_pattern(strict_checks);
-                if (!pattern) {
-                    expected("binding pattern");
-                    return {};
-                }
-                alias = pattern.release_nonnull();
             } else {
                 expected("identifier or binding pattern");
                 return {};
@@ -2233,7 +2307,7 @@ NonnullRefPtr<VariableDeclaration> Parser::parse_variable_declaration(bool for_l
                     check_declarations(declaration);
                 }
             }
-        } else if (auto pattern = parse_binding_pattern(declaration_kind != DeclarationKind::Var)) {
+        } else if (auto pattern = parse_binding_pattern(declaration_kind != DeclarationKind::Var, false)) {
             target = pattern.release_nonnull();
 
             if ((declaration_kind == DeclarationKind::Let || declaration_kind == DeclarationKind::Const)) {
@@ -2614,7 +2688,7 @@ NonnullRefPtr<CatchClause> Parser::parse_catch_clause()
         if (match_identifier_name() && (!match(TokenType::Yield) || !m_state.in_generator_function_context))
             parameter = consume().value();
         else
-            pattern_parameter = parse_binding_pattern(true);
+            pattern_parameter = parse_binding_pattern(true, false);
         consume(TokenType::ParenClose);
     }
 
