@@ -214,6 +214,13 @@ void VM::assign(const NonnullRefPtr<BindingPattern>& target, Value value, Global
         if (!iterator)
             return;
 
+        // Record: iteratorRecord.[[Done]]
+        auto iterator_done = false;
+        ScopeGuard closing_iterator_guard([&] {
+            if (!iterator_done)
+                iterator_close(*iterator);
+        });
+
         for (size_t i = 0; i < binding.entries.size(); i++) {
             if (exception())
                 return;
@@ -238,17 +245,21 @@ void VM::assign(const NonnullRefPtr<BindingPattern>& target, Value value, Global
                 VERIFY(i == binding.entries.size() - 1);
 
                 auto* array = Array::create(global_object, 0);
-                for (;;) {
+                while (!iterator_done) {
                     auto next_object = iterator_next(*iterator);
-                    if (!next_object)
+                    if (!next_object) {
+                        iterator_done = true;
                         return;
+                    }
 
                     auto done_property = next_object->get(names.done);
                     if (exception())
                         return;
 
-                    if (done_property.to_boolean())
+                    if (done_property.to_boolean()) {
+                        iterator_done = true;
                         break;
+                    }
 
                     auto next_value = next_object->get(names.value);
                     if (exception())
@@ -259,15 +270,17 @@ void VM::assign(const NonnullRefPtr<BindingPattern>& target, Value value, Global
                 value = array;
             } else if (iterator) {
                 auto next_object = iterator_next(*iterator);
-                if (!next_object)
+                if (!next_object) {
+                    iterator_done = true;
                     return;
+                }
 
                 auto done_property = next_object->get(names.done);
                 if (exception())
                     return;
 
                 if (done_property.to_boolean()) {
-                    iterator = nullptr;
+                    iterator_done = true;
                     value = js_undefined();
                 } else {
                     value = next_object->get(names.value);
@@ -307,7 +320,10 @@ void VM::assign(const NonnullRefPtr<BindingPattern>& target, Value value, Global
         break;
     }
     case BindingPattern::Kind::Object: {
-        auto object = value.to_object(global_object);
+        auto* object = value.to_object(global_object);
+        if (!object)
+            return;
+
         HashTable<PropertyName, PropertyNameTraits> seen_names;
         for (auto& property : binding.entries) {
             VERIFY(!property.is_elision());
@@ -330,16 +346,29 @@ void VM::assign(const NonnullRefPtr<BindingPattern>& target, Value value, Global
                     });
 
                 auto* rest_object = Object::create(global_object, global_object.object_prototype());
-                for (auto& object_property : object->shape().property_table()) {
-                    if (!object_property.value.attributes.is_enumerable())
+
+                //                if (!object)
+                //                    return;
+
+                // 7.3.25 CopyDataProperties ( target, source, excludedItems ), https://tc39.es/ecma262/#sec-copydataproperties
+                for (auto& next_key_value : object->internal_own_property_keys()) {
+                    auto next_key = PropertyName::from_value(global_object, next_key_value);
+                    if (seen_names.contains(next_key))
                         continue;
-                    if (seen_names.contains(object_property.key.to_display_string()))
-                        continue;
-                    rest_object->set(object_property.key, object->get(object_property.key), Object::ShouldThrowExceptions::Yes);
+
+                    auto desc = object->internal_get_own_property(next_key);
                     if (exception())
                         return;
-                }
 
+                    if (desc.has_value() && desc->attributes().is_enumerable()) {
+                        auto prop_value = object->get(next_key);
+                        if (exception())
+                            return;
+                        rest_object->create_data_property_or_throw(next_key, prop_value);
+                        if (exception())
+                            return;
+                    }
+                }
                 value_to_assign = rest_object;
             } else {
                 property.name.visit(
@@ -367,9 +396,9 @@ void VM::assign(const NonnullRefPtr<BindingPattern>& target, Value value, Global
                     break;
 
                 value_to_assign = object->get(assignment_name);
-            }
 
-            seen_names.set(assignment_name);
+                seen_names.set(assignment_name);
+            }
 
             if (value_to_assign.is_empty())
                 value_to_assign = js_undefined();
