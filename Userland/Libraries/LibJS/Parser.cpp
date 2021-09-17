@@ -2825,8 +2825,24 @@ NonnullRefPtr<Statement> Parser::parse_for_in_of_statement(NonnullRefPtr<ASTNode
             syntax_error("need exactly one variable declaration in for..in/of");
         else if (declarations.first().init() != nullptr)
             syntax_error("variable initializer not allowed in for..in/of");
-    } else if (!lhs->is_identifier() && !is<ObjectExpression>(*lhs) && !is<MemberExpression>(*lhs) && !is<ArrayExpression>(*lhs)) {
-        syntax_error(String::formatted("Invalid left-hand side in for-loop ('{}')", lhs->class_name()));
+    } else if (!lhs->is_identifier() && !is<MemberExpression>(*lhs)) {
+        bool valid = false;
+        if (is<ObjectExpression>(*lhs) || is<ArrayExpression>(*lhs)) {
+            auto synthesized_binding_pattern = synthesize_binding_pattern(static_cast<Expression const&>(*lhs));
+            if (synthesized_binding_pattern) {
+                NonnullRefPtrVector<VariableDeclarator> declarations;
+                Variant<NonnullRefPtr<Identifier>, NonnullRefPtr<BindingPattern>> target = synthesized_binding_pattern.release_nonnull();
+                declarations.append(create_ast_node<VariableDeclarator>(
+                    { m_state.current_token.filename(), lhs->source_range().start, lhs->source_range().end },
+                    move(target),
+                    RefPtr<Expression> {}));
+                lhs = create_ast_node<VariableDeclaration>({ m_state.current_token.filename(), lhs->source_range().start, lhs->source_range().end }, DeclarationKind::Var, move(declarations));
+
+                valid = true;
+            }
+        }
+        if (!valid)
+            syntax_error(String::formatted("Invalid left-hand side in for-loop ('{}')", lhs->class_name()));
     }
     auto in_or_of = consume();
 
