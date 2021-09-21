@@ -67,7 +67,12 @@ public:
 
     // These are for compatibility with the TRY() macro in AK.
     [[nodiscard]] bool is_error() const { return m_type == Type::Throw; }
-    [[nodiscard]] Value release_value() { return m_value.release_value(); }
+    [[nodiscard]] Value release_value()
+    {
+        if (m_value.has_value())
+            return m_value.release_value();
+        return {};
+    }
     Completion release_error()
     {
         VERIFY(is_error());
@@ -141,9 +146,9 @@ public:
 };
 
 // 6.2.3.2 NormalCompletion ( value ), https://tc39.es/ecma262/#sec-normalcompletion
-inline Completion normal_completion(Value value)
+inline Completion normal_completion(Optional<Value> value)
 {
-    return { Completion::Type::Normal, value, {} };
+    return { Completion::Type::Normal, move(value), {} };
 }
 
 // 6.2.3.3 ThrowCompletion ( value ), https://tc39.es/ecma262/#sec-throwcompletion
