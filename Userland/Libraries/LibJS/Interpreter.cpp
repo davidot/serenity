@@ -95,20 +95,9 @@ const Realm& Interpreter::realm() const
 
 void Interpreter::enter_scope(const ScopeNode& scope_node, ScopeType scope_type, GlobalObject& global_object)
 {
-    ScopeGuard guard([&] {
-        for (auto& declaration : scope_node.hoisted_functions()) {
-            lexical_environment()->put_into_environment(declaration.name(), { js_undefined(), DeclarationKind::Var });
-        }
-        for (auto& declaration : scope_node.functions()) {
-            auto* function = OrdinaryFunctionObject::create(global_object, declaration.name(), declaration.body(), declaration.parameters(), declaration.function_length(), lexical_environment(), declaration.kind(), declaration.is_strict_mode());
-            vm().set_variable(declaration.name(), function, global_object);
-        }
-    });
 
     if (scope_type == ScopeType::Function) {
         push_scope({ scope_type, scope_node, false });
-        for (auto& declaration : scope_node.functions())
-            lexical_environment()->put_into_environment(declaration.name(), { js_undefined(), DeclarationKind::Var });
         return;
     }
 

@@ -216,12 +216,22 @@ void ConcatString::execute_impl(Bytecode::Interpreter& interpreter) const
 
 void GetVariable::execute_impl(Bytecode::Interpreter& interpreter) const
 {
-    interpreter.accumulator() = interpreter.vm().get_variable(interpreter.current_executable().get_string(m_identifier), interpreter.global_object());
+    auto& vm = interpreter.vm();
+    auto reference = vm.resolve_binding(interpreter.current_executable().get_string(m_identifier));
+    if (vm.exception())
+        return;
+
+    interpreter.accumulator() = reference.get_value(interpreter.global_object());
 }
 
 void SetVariable::execute_impl(Bytecode::Interpreter& interpreter) const
 {
-    interpreter.vm().set_variable(interpreter.current_executable().get_string(m_identifier), interpreter.accumulator(), interpreter.global_object());
+    auto& vm = interpreter.vm();
+    auto reference = vm.resolve_binding(interpreter.current_executable().get_string(m_identifier));
+    if (vm.exception())
+        return;
+
+    reference.put_value(interpreter.global_object(), interpreter.accumulator());
 }
 
 void GetById::execute_impl(Bytecode::Interpreter& interpreter) const

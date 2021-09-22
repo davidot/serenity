@@ -825,7 +825,7 @@ Value UnaryExpression::execute(Interpreter& interpreter, GlobalObject& global_ob
         if (reference.is_unresolvable()) {
             lhs_result = js_undefined();
         } else {
-            lhs_result = reference.get_value(global_object, false);
+            lhs_result = reference.get_value(global_object);
         }
     } else {
         lhs_result = m_lhs->execute(interpreter, global_object);
@@ -1009,7 +1009,7 @@ Value ClassDeclaration::execute(Interpreter& interpreter, GlobalObject& global_o
     if (interpreter.exception())
         return {};
 
-    interpreter.lexical_environment()->put_into_environment(m_class_expression->name(), { class_constructor, DeclarationKind::Let });
+    interpreter.lexical_environment()->initialize_binding(global_object, m_class_expression->name(), class_constructor);
 
     return {};
 }
@@ -1499,14 +1499,11 @@ Value Identifier::execute(Interpreter& interpreter, GlobalObject& global_object)
 {
     InterpreterNodeScope node_scope { interpreter, *this };
 
-    auto value = interpreter.vm().get_variable(string(), global_object);
+    auto reference = to_reference(interpreter, global_object);
     if (interpreter.exception())
         return {};
-    if (value.is_empty()) {
-        interpreter.vm().throw_exception<ReferenceError>(global_object, ErrorType::UnknownIdentifier, string());
-        return {};
-    }
-    return value;
+
+    return reference.get_value(global_object);
 }
 
 void Identifier::dump(int indent) const
@@ -1810,7 +1807,7 @@ Value VariableDeclaration::execute(Interpreter& interpreter, GlobalObject& globa
                     auto variable_name = id->string();
                     if (is<ClassExpression>(*init))
                         update_function_name(initializer_result, variable_name);
-                    interpreter.vm().set_variable(variable_name, initializer_result, global_object, true);
+                    interpreter.vm().assign(variable_name, initializer_result, global_object, true);
                 },
                 [&](NonnullRefPtr<BindingPattern> const& pattern) {
                     interpreter.vm().assign(pattern, initializer_result, global_object, true);

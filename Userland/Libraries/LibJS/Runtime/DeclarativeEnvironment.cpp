@@ -42,22 +42,6 @@ void DeclarativeEnvironment::visit_edges(Visitor& visitor)
         visitor.visit(it.value.value);
 }
 
-Optional<Variable> DeclarativeEnvironment::get_from_environment(FlyString const& name) const
-{
-    return m_variables.get(name);
-}
-
-bool DeclarativeEnvironment::put_into_environment(FlyString const& name, Variable variable)
-{
-    m_variables.set(name, variable);
-    return true;
-}
-
-bool DeclarativeEnvironment::delete_from_environment(FlyString const& name)
-{
-    return m_variables.remove(name);
-}
-
 // 9.1.1.1.1 HasBinding ( N ), https://tc39.es/ecma262/#sec-declarative-environment-records-hasbinding-n
 bool DeclarativeEnvironment::has_binding(FlyString const& name) const
 {

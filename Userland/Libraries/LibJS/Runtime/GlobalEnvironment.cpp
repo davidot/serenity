@@ -30,24 +30,6 @@ void GlobalEnvironment::visit_edges(Cell::Visitor& visitor)
     visitor.visit(m_declarative_record);
 }
 
-Optional<Variable> GlobalEnvironment::get_from_environment(FlyString const& name) const
-{
-    // FIXME: This should be a "composite" of the object record and the declarative record.
-    return m_object_record->get_from_environment(name);
-}
-
-bool GlobalEnvironment::put_into_environment(FlyString const& name, Variable variable)
-{
-    // FIXME: This should be a "composite" of the object record and the declarative record.
-    return m_object_record->put_into_environment(name, variable);
-}
-
-bool GlobalEnvironment::delete_from_environment(FlyString const& name)
-{
-    // FIXME: This should be a "composite" of the object record and the declarative record.
-    return object_record().delete_from_environment(name);
-}
-
 Value GlobalEnvironment::get_this_binding(GlobalObject&) const
 {
     return &global_object();

@@ -104,7 +104,7 @@ public:
     }
 
     void put_value(GlobalObject&, Value);
-    Value get_value(GlobalObject&, bool throw_if_undefined = true) const;
+    Value get_value(GlobalObject&) const;
     bool delete_(GlobalObject&);
 
     String to_string() const;

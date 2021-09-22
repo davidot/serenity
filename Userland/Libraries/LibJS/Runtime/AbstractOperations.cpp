@@ -545,15 +545,11 @@ Object* create_mapped_arguments_object(GlobalObject& global_object, FunctionObje
             // 3. Perform map.[[DefineOwnProperty]](! ToString(𝔽(index)), PropertyDescriptor { [[Set]]: p, [[Get]]: g, [[Enumerable]]: false, [[Configurable]]: true }).
             object->parameter_map().define_native_accessor(
                 String::number(index),
-                [&environment, name](VM&, GlobalObject&) -> Value {
-                    auto variable = environment.get_from_environment(name);
-                    if (!variable.has_value())
-                        return {};
-                    return variable->value;
+                [&environment, name](VM&, GlobalObject& global_object_getter) -> Value {
+                    return environment.get_binding_value(global_object_getter, name, false);
                 },
-                [&environment, name](VM& vm, GlobalObject&) {
-                    auto value = vm.argument(0);
-                    environment.put_into_environment(name, Variable { value, DeclarationKind::Var });
+                [&environment, name](VM& vm, GlobalObject& global_object_setter) {
+                    environment.set_mutable_binding(global_object_setter, name, vm.argument(0), false);
                     return js_undefined();
                 },
                 Attribute::Configurable);

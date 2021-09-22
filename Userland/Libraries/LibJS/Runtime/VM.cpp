@@ -137,40 +137,12 @@ Symbol* VM::get_global_symbol(const String& description)
     return new_global_symbol;
 }
 
-void VM::set_variable(const FlyString& name, Value value, GlobalObject& global_object, bool first_assignment, Environment* specific_scope)
+void VM::assign(const FlyString& target, Value value, GlobalObject& global_object, bool, Environment* specific_scope)
 {
-    Optional<Variable> possible_match;
-    if (!specific_scope && m_execution_context_stack.size()) {
-        for (auto* environment = lexical_environment(); environment; environment = environment->outer_environment()) {
-            possible_match = environment->get_from_environment(name);
-            if (possible_match.has_value()) {
-                specific_scope = environment;
-                break;
-            }
-        }
-    }
-
-    if (specific_scope && possible_match.has_value()) {
-        if (!first_assignment && possible_match.value().declaration_kind == DeclarationKind::Const) {
-            throw_exception<TypeError>(global_object, ErrorType::InvalidAssignToConst);
-            return;
-        }
-
-        specific_scope->put_into_environment(name, { value, possible_match.value().declaration_kind });
+    auto reference = resolve_binding(target, specific_scope);
+    if (exception())
         return;
-    }
-
-    if (specific_scope) {
-        specific_scope->put_into_environment(name, { value, DeclarationKind::Var });
-        return;
-    }
-
-    global_object.set(name, value, Object::ShouldThrowExceptions::Yes);
-}
-
-void VM::assign(const FlyString& target, Value value, GlobalObject& global_object, bool first_assignment, Environment* specific_scope)
-{
-    set_variable(target, move(value), global_object, first_assignment, specific_scope);
+    reference.put_value(global_object, value);
 }
 
 void VM::assign(const Variant<NonnullRefPtr<Identifier>, NonnullRefPtr<BindingPattern>>& target, Value value, GlobalObject& global_object, bool first_assignment, Environment* specific_scope)
@@ -277,7 +249,7 @@ void VM::assign(const NonnullRefPtr<BindingPattern>& target, Value value, Global
             entry.alias.visit(
                 [&](Empty) {},
                 [&](NonnullRefPtr<Identifier> const& identifier) {
-                    set_variable(identifier->string(), value, global_object, first_assignment, specific_scope);
+                    assign(identifier->string(), value, global_object, first_assignment, specific_scope);
                 },
                 [&](NonnullRefPtr<BindingPattern> const& pattern) {
                     assign(pattern, value, global_object, first_assignment, specific_scope);
@@ -388,11 +360,11 @@ void VM::assign(const NonnullRefPtr<BindingPattern>& target, Value value, Global
 
             property.alias.visit(
                 [&](Empty) {
-                    set_variable(assignment_name.to_string(), value_to_assign, global_object, first_assignment, specific_scope);
+                    assign(assignment_name.to_string(), value_to_assign, global_object, first_assignment, specific_scope);
                 },
                 [&](NonnullRefPtr<Identifier> const& identifier) {
                     VERIFY(!property.is_rest);
-                    set_variable(identifier->string(), value_to_assign, global_object, first_assignment, specific_scope);
+                    assign(identifier->string(), value_to_assign, global_object, first_assignment, specific_scope);
                 },
                 [&](NonnullRefPtr<BindingPattern> const& pattern) {
                     VERIFY(!property.is_rest);
@@ -414,48 +386,6 @@ void VM::assign(const NonnullRefPtr<BindingPattern>& target, Value value, Global
     }
 }
 
-Value VM::get_variable(const FlyString& name, GlobalObject& global_object)
-{
-    if (!m_execution_context_stack.is_empty()) {
-        auto& context = running_execution_context();
-        if (name == names.arguments.as_string() && context.function) {
-            // HACK: Special handling for the name "arguments":
-            //       If the name "arguments" is defined in the current scope, for example via
-            //       a function parameter, or by a local var declaration, we use that.
-            //       Otherwise, we return a lazily constructed Array with all the argument values.
-            // FIXME: Do something much more spec-compliant.
-            auto possible_match = lexical_environment()->get_from_environment(name);
-            if (possible_match.has_value())
-                return possible_match.value().value;
-            if (!context.arguments_object) {
-                if (context.function->is_strict_mode() || !context.function->has_simple_parameter_list()) {
-                    context.arguments_object = create_unmapped_arguments_object(global_object, context.arguments.span());
-                } else {
-                    context.arguments_object = create_mapped_arguments_object(global_object, *context.function, verify_cast<OrdinaryFunctionObject>(context.function)->parameters(), context.arguments.span(), *lexical_environment());
-                }
-            }
-            return context.arguments_object;
-        }
-
-        for (auto* environment = lexical_environment(); environment; environment = environment->outer_environment()) {
-            auto possible_match = environment->get_from_environment(name);
-            if (exception())
-                return {};
-            if (possible_match.has_value())
-                return possible_match.value().value;
-            if (environment->has_binding(name))
-                return environment->get_binding_value(global_object, name, false);
-        }
-    }
-
-    if (!global_object.storage_has(name)) {
-        if (m_underscore_is_last_value && name == "_")
-            return m_last_value;
-        return {};
-    }
-    return global_object.get(name);
-}
-
 // 9.1.2.1 GetIdentifierReference ( env, name, strict ), https://tc39.es/ecma262/#sec-getidentifierreference
 Reference VM::get_identifier_reference(Environment* environment, FlyString name, bool strict)
 {
@@ -464,23 +394,14 @@ Reference VM::get_identifier_reference(Environment* environment, FlyString name,
         // a. Return the Reference Record { [[Base]]: unresolvable, [[ReferencedName]]: name, [[Strict]]: strict, [[ThisValue]]: empty }.
         return Reference { Reference::BaseType::Unresolvable, move(name), strict };
     }
+    auto exists = environment->has_binding(name);
+    if (exception())
+        return {};
 
-    // FIXME: The remainder of this function is non-conforming.
-
-    for (; environment && environment->outer_environment(); environment = environment->outer_environment()) {
-        auto possible_match = environment->get_from_environment(name);
-        if (possible_match.has_value())
-            return Reference { *environment, move(name), strict };
-        if (environment->has_binding(name))
-            return Reference { *environment, move(name), strict };
-    }
-
-    auto& global_environment = interpreter().realm().global_environment();
-    if (global_environment.has_binding(name) || !in_strict_mode()) {
-        return Reference { global_environment, move(name), strict };
-    }
-
-    return Reference { Reference::BaseType::Unresolvable, move(name), strict };
+    if (exists)
+        return Reference { *environment, move(name), strict };
+    else
+        return get_identifier_reference(environment->outer_environment(), move(name), strict);
 }
 
 // 9.4.2 ResolveBinding ( name [ , env ] ), https://tc39.es/ecma262/#sec-resolvebinding
