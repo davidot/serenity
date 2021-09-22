@@ -569,7 +569,7 @@ Value ForInStatement::execute(Interpreter& interpreter, GlobalObject& global_obj
             if (auto reference_ptr = target.get_pointer<Reference>())
                 reference_ptr->put_value(global_object, value);
             else
-                interpreter.vm().assign(target.downcast<NonnullRefPtr<Identifier>, NonnullRefPtr<BindingPattern>>(), value, global_object, has_declaration);
+                TRY_OR_DISCARD(interpreter.vm().binding_initialization(target.get<NonnullRefPtr<BindingPattern>>(), value, nullptr, global_object));
             if (interpreter.exception())
                 return {};
             last_value = interpreter.execute_statement(global_object, *m_body).value_or(last_value);
@@ -613,10 +613,14 @@ Value ForOfStatement::execute(Interpreter& interpreter, GlobalObject& global_obj
         return {};
 
     get_iterator_values(global_object, rhs_result, [&](Value value) {
-        if (auto reference_ptr = target.get_pointer<Reference>())
+        if (auto reference_ptr = target.get_pointer<Reference>()) {
             reference_ptr->put_value(global_object, value);
-        else
-            interpreter.vm().assign(target.downcast<NonnullRefPtr<Identifier>, NonnullRefPtr<BindingPattern>>(), value, global_object, has_declaration);
+        } else {
+            auto result = interpreter.vm().binding_initialization(target.get<NonnullRefPtr<BindingPattern>>(), value, nullptr, global_object);
+            if (result.is_error())
+                return IterationDecision::Break;
+        }
+
         last_value = interpreter.execute_statement(global_object, *m_body).value_or(last_value);
         if (interpreter.exception())
             return IterationDecision::Break;
@@ -1643,11 +1647,6 @@ Value AssignmentExpression::execute(Interpreter& interpreter, GlobalObject& glob
                     return {};
             }
 
-            if (reference.is_unresolvable()) {
-                interpreter.vm().throw_exception<ReferenceError>(global_object, ErrorType::InvalidLeftHandAssignment);
-                return {};
-            }
-
             reference.put_value(global_object, rhs_result);
             if (interpreter.exception())
                 return {};
@@ -1661,9 +1660,7 @@ Value AssignmentExpression::execute(Interpreter& interpreter, GlobalObject& glob
             if (interpreter.exception())
                 return {};
 
-            interpreter.vm().assign(pattern, rhs_result, global_object);
-            if (interpreter.exception())
-                return {};
+            TRY_OR_DISCARD(interpreter.vm().destructuring_assignment_evaluation(pattern, rhs_result, global_object));
 
             return rhs_result;
         });
@@ -1799,19 +1796,42 @@ Value VariableDeclaration::execute(Interpreter& interpreter, GlobalObject& globa
 
     for (auto& declarator : m_declarations) {
         if (auto* init = declarator.init()) {
-            auto initializer_result = init->execute(interpreter, global_object);
-            if (interpreter.exception())
-                return {};
             declarator.target().visit(
                 [&](NonnullRefPtr<Identifier> const& id) {
-                    auto variable_name = id->string();
-                    if (is<ClassExpression>(*init))
-                        update_function_name(initializer_result, variable_name);
-                    interpreter.vm().assign(variable_name, initializer_result, global_object, true);
+                    auto reference = id->to_reference(interpreter, global_object);
+                    if (interpreter.exception())
+                        return;
+                    auto initializer_result = init->execute(interpreter, global_object);
+                    if (interpreter.exception())
+                        return;
+                    VERIFY(!initializer_result.is_empty());
+
+                    // FIXME: Named eval
+                    if (m_declaration_kind == DeclarationKind::Var)
+                        reference.put_value(global_object, initializer_result);
+                    else
+                        reference.initialize_referenced_binding(global_object, initializer_result);
                 },
                 [&](NonnullRefPtr<BindingPattern> const& pattern) {
-                    interpreter.vm().assign(pattern, initializer_result, global_object, true);
+                    auto initializer_result = init->execute(interpreter, global_object);
+                    if (interpreter.exception())
+                        return;
+
+                    Environment* environment = m_declaration_kind == DeclarationKind::Var ? nullptr : interpreter.lexical_environment();
+
+                    // FIXME: I want to use TRY_OR_DISCARD here but can't return...
+                    auto result = interpreter.vm().binding_initialization(pattern, initializer_result, environment, global_object);
+                    (void)result;
                 });
+            if (interpreter.exception())
+                return {};
+        } else if (m_declaration_kind != DeclarationKind::Var) {
+            VERIFY(declarator.target().has<NonnullRefPtr<Identifier>>());
+            auto& identifier = declarator.target().get<NonnullRefPtr<Identifier>>();
+            auto reference = identifier->to_reference(interpreter, global_object);
+            reference.initialize_referenced_binding(global_object, js_undefined());
+            if (interpreter.exception())
+                return {};
         }
     }
     return {};
@@ -2364,7 +2384,7 @@ Value TryStatement::execute(Interpreter& interpreter, GlobalObject& global_objec
             TemporaryChange<Environment*> scope_change(interpreter.vm().running_execution_context().lexical_environment, catch_scope);
 
             if (auto* pattern = m_handler->parameter().get_pointer<NonnullRefPtr<BindingPattern>>())
-                interpreter.vm().assign(*pattern, exception->value(), global_object, true);
+                (void)interpreter.vm().binding_initialization(*pattern, exception->value(), catch_scope, global_object);
             if (interpreter.exception())
                 result = js_undefined();
             else

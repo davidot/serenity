@@ -171,7 +171,18 @@ Value OrdinaryFunctionObject::execute_function_body()
                         argument_value = js_undefined();
                     }
 
-                    vm.assign(param, argument_value, global_object(), true, vm.lexical_environment());
+                    if constexpr (IsSame<FlyString const&, decltype(param)>) {
+                        Reference reference = vm.resolve_binding(param, vm.running_execution_context().lexical_environment);
+                        if (vm.exception())
+                            return;
+                        // Here the difference from hasDuplicates is important
+                        reference.initialize_referenced_binding(global_object(), argument_value);
+                    } else if (IsSame<NonnullRefPtr<BindingPattern> const&, decltype(param)>) {
+                        // Here the difference from hasDuplicates is important
+                        auto result = vm.binding_initialization(param, argument_value, vm.running_execution_context().lexical_environment, global_object());
+                        if (result.is_error())
+                            return;
+                    }
                 });
 
             if (vm.exception())

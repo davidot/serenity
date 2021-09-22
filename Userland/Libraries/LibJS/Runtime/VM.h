@@ -1,6 +1,7 @@
 /*
  * Copyright (c) 2020, Andreas Kling <kling@serenityos.org>
  * Copyright (c) 2020-2021, Linus Groh <linusg@serenityos.org>
+ * Copyright (c) 2021, David Tuin <david.tuin@gmail.com>
  *
  * SPDX-License-Identifier: BSD-2-Clause
  */
@@ -206,10 +207,6 @@ public:
     ScopeType unwind_until() const { return m_unwind_until; }
     FlyString unwind_until_label() const { return m_unwind_until_label; }
 
-    void assign(const Variant<NonnullRefPtr<Identifier>, NonnullRefPtr<BindingPattern>>& target, Value, GlobalObject&, bool first_assignment = false, Environment* specific_scope = nullptr);
-    void assign(const FlyString& target, Value, GlobalObject&, bool first_assignment = false, Environment* specific_scope = nullptr);
-    void assign(const NonnullRefPtr<BindingPattern>& target, Value, GlobalObject&, bool first_assignment = false, Environment* specific_scope = nullptr);
-
     Reference resolve_binding(FlyString const&, Environment* = nullptr);
     Reference get_identifier_reference(Environment*, FlyString, bool strict);
 
@@ -283,6 +280,10 @@ public:
 
     CustomData* custom_data() { return m_custom_data; }
 
+    Completion destructuring_assignment_evaluation(NonnullRefPtr<BindingPattern> const& target, Value value, GlobalObject& global_object);
+    Completion binding_initialization(FlyString const& target, Value value, Environment* environment, GlobalObject& global_object);
+    Completion binding_initialization(NonnullRefPtr<BindingPattern> const& target, Value value, Environment* environment, GlobalObject& global_object);
+
 private:
     explicit VM(OwnPtr<CustomData>);
 
@@ -290,6 +291,11 @@ private:
 
     [[nodiscard]] Value call_internal(FunctionObject&, Value this_value, Optional<MarkedValueList> arguments);
     void prepare_for_ordinary_call(FunctionObject&, ExecutionContext& callee_context, Object* new_target);
+
+    ThrowCompletionOr<Object*> copy_data_properties(Object& rest_object, Object const& source, HashTable<PropertyName, PropertyNameTraits> const& seen_names, GlobalObject& global_object);
+
+    Completion property_binding_initialization(BindingPattern const& binding, Value value, Environment* environment, GlobalObject& global_object);
+    Completion iterator_binding_initialization(BindingPattern const& binding, Object* iterator, bool& iterator_done, Environment* environment, GlobalObject& global_object);
 
     Exception* m_exception { nullptr };
 
