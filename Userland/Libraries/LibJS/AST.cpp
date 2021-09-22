@@ -2465,28 +2465,30 @@ Value TryStatement::execute(Interpreter& interpreter, GlobalObject& global_objec
 
     auto result = interpreter.execute_statement(global_object, m_block, ScopeType::Try);
     if (auto* exception = interpreter.exception()) {
+        // 14.15.2 Runtime Semantics: CatchClauseEvaluation, https://tc39.es/ecma262/#sec-runtime-semantics-catchclauseevaluation
         if (m_handler) {
             interpreter.vm().clear_exception();
 
-            HashMap<FlyString, Variable> parameters;
+            auto* catch_scope = new_declarative_environment(*interpreter.lexical_environment());
+
             m_handler->parameter().visit(
                 [&](FlyString const& parameter) {
-                    parameters.set(parameter, Variable { exception->value(), DeclarationKind::Var });
+                    catch_scope->create_mutable_binding(global_object, parameter, false);
+                    catch_scope->initialize_binding(global_object, parameter, exception->value());
                 },
                 [&](NonnullRefPtr<BindingPattern> const& pattern) {
                     pattern->for_each_bound_name([&](auto& name) {
-                        parameters.set(name, Variable { Value {}, DeclarationKind::Var });
+                        catch_scope->create_mutable_binding(global_object, name, false);
                     });
+                    auto result = interpreter.vm().binding_initialization(pattern, exception->value(), catch_scope, global_object);
+                    (void)result;
                 });
-            auto* catch_scope = interpreter.heap().allocate<DeclarativeEnvironment>(global_object, move(parameters), interpreter.vm().running_execution_context().lexical_environment);
-            TemporaryChange<Environment*> scope_change(interpreter.vm().running_execution_context().lexical_environment, catch_scope);
 
-            if (auto* pattern = m_handler->parameter().get_pointer<NonnullRefPtr<BindingPattern>>())
-                (void)interpreter.vm().binding_initialization(*pattern, exception->value(), catch_scope, global_object);
-            if (interpreter.exception())
-                result = js_undefined();
-            else
+            if (!interpreter.exception()) {
+                TemporaryChange<Environment*> scope_change(interpreter.vm().running_execution_context().lexical_environment, catch_scope);
+
                 result = interpreter.execute_statement(global_object, m_handler->body());
+            }
         }
     }
 
