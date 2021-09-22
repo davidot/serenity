@@ -278,6 +278,8 @@ public:
     Completion binding_initialization(FlyString const& target, Value value, Environment* environment, GlobalObject& global_object);
     Completion binding_initialization(NonnullRefPtr<BindingPattern> const& target, Value value, Environment* environment, GlobalObject& global_object);
 
+    ThrowCompletionOr<Value> named_evaluation_if_anonymous_function(GlobalObject& global_object, ASTNode const& expression, FlyString const& name);
+
 private:
     explicit VM(OwnPtr<CustomData>);
 

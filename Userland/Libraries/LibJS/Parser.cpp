@@ -928,7 +928,6 @@ Parser::PrimaryExpressionParseResult Parser::parse_primary_expression()
         consume(TokenType::ParenClose);
         if (is<FunctionExpression>(*expression)) {
             auto& function = static_cast<FunctionExpression&>(*expression);
-            function.set_cannot_auto_rename();
             if (function.kind() == FunctionKind::Generator && function.name() == "yield"sv)
                 syntax_error("function is not allowed to be called 'yield' in this context", function.source_range().start);
         }
@@ -1656,14 +1655,6 @@ NonnullRefPtr<AssignmentExpression> Parser::parse_assignment_expression(Assignme
         syntax_error("Cannot assign to function call");
     }
     auto rhs = parse_expression(min_precedence, associativity);
-    if (assignment_op == AssignmentOp::Assignment && is<FunctionExpression>(*rhs)) {
-        auto ident = lhs;
-        if (is<MemberExpression>(*lhs)) {
-            ident = static_cast<MemberExpression&>(*lhs).property();
-        }
-        if (is<Identifier>(*ident))
-            static_cast<FunctionExpression&>(*rhs).set_name_if_possible(static_cast<Identifier&>(*ident).string());
-    }
     return create_ast_node<AssignmentExpression>({ m_state.current_token.filename(), rule_start.position(), position() }, assignment_op, move(lhs), move(rhs));
 }
 
@@ -2391,10 +2382,6 @@ NonnullRefPtr<VariableDeclaration> Parser::parse_variable_declaration(bool for_l
             syntax_error("Missing initializer in 'const' variable declaration");
         } else if (!for_loop_variable_declaration && target.has<NonnullRefPtr<BindingPattern>>()) {
             syntax_error("Missing initializer in destructuring assignment");
-        }
-
-        if (init && is<FunctionExpression>(*init) && target.has<NonnullRefPtr<Identifier>>()) {
-            static_cast<FunctionExpression&>(*init).set_name_if_possible(target.get<NonnullRefPtr<Identifier>>()->string());
         }
 
         declarations.append(create_ast_node<VariableDeclarator>(

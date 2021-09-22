@@ -105,22 +105,34 @@ Value FunctionDeclaration::execute(Interpreter& interpreter, GlobalObject&) cons
     return {};
 }
 
-// 15.2.5 Runtime Semantics: InstantiateOrdinaryFunctionExpression, https://tc39.es/ecma262/#sec-runtime-semantics-instantiateordinaryfunctionexpression
 Value FunctionExpression::execute(Interpreter& interpreter, GlobalObject& global_object) const
 {
     InterpreterNodeScope node_scope { interpreter, *this };
-    auto* func_env = interpreter.lexical_environment();
-    bool has_identifier = !name().is_empty() && !is_auto_renamed();
+    return instantiate_ordinary_function_expression(interpreter, global_object, name());
+}
 
-    if (has_identifier) {
-        func_env = interpreter.heap().allocate<DeclarativeEnvironment>(global_object, func_env);
-        func_env->create_immutable_binding(global_object, name(), false);
+// 15.2.5 Runtime Semantics: InstantiateOrdinaryFunctionExpression, https://tc39.es/ecma262/#sec-runtime-semantics-instantiateordinaryfunctionexpression
+Value FunctionExpression::instantiate_ordinary_function_expression(Interpreter& interpreter, GlobalObject& global_object, FlyString given_name) const
+{
+    if (given_name.is_empty())
+        given_name = "";
+    auto has_own_name = !name().is_empty();
+
+    auto const& used_name = has_own_name ? name() : given_name;
+    auto* scope = interpreter.lexical_environment();
+    if (has_own_name) {
+        VERIFY(scope);
+        scope = new_declarative_environment(*scope);
+        scope->create_immutable_binding(global_object, name(), false);
     }
 
-    auto closure = OrdinaryFunctionObject::create(global_object, name(), body(), parameters(), function_length(), func_env, kind(), is_strict_mode(), is_arrow_function());
+    auto closure = OrdinaryFunctionObject::create(global_object, used_name, body(), parameters(), function_length(), scope, kind(), is_strict_mode(), is_arrow_function());
 
-    if (has_identifier)
-        func_env->initialize_binding(global_object, name(), closure);
+    // FIXME: SetFunctionName
+    // FIXME: MakeConstructor
+
+    if (has_own_name)
+        scope->initialize_binding(global_object, name(), closure);
 
     return closure;
 }
@@ -997,12 +1009,51 @@ Value ClassExpression::execute(Interpreter& interpreter, GlobalObject& global_ob
 {
     InterpreterNodeScope node_scope { interpreter, *this };
 
-    auto& vm = interpreter.vm();
-    Value class_constructor_value = m_constructor->execute(interpreter, global_object);
-    if (interpreter.exception())
-        return {};
+    // FIXME: Set value.[[SourceText]] to the source text matched by ClassExpression.
+    return TRY_OR_DISCARD(class_definition_evaluation(interpreter, global_object, m_name, m_name.is_null() ? "" : m_name));
+}
 
-    update_function_name(class_constructor_value, m_name);
+Value ClassDeclaration::execute(Interpreter& interpreter, GlobalObject& global_object) const
+{
+    InterpreterNodeScope node_scope { interpreter, *this };
+
+    auto name = m_class_expression->name();
+    VERIFY(!name.is_empty());
+    auto class_constructor = TRY_OR_DISCARD(m_class_expression->class_definition_evaluation(interpreter, global_object, name, name));
+
+    if (interpreter.lexical_environment()) {
+        interpreter.lexical_environment()->initialize_binding(global_object, name, class_constructor);
+    } else {
+        auto reference = interpreter.vm().resolve_binding(name);
+
+        reference.put_value(global_object, class_constructor);
+        if (interpreter.exception())
+            return {};
+    }
+
+    return class_constructor;
+}
+
+// 15.7.14 Runtime Semantics: ClassDefinitionEvaluation, https://tc39.es/ecma262/#sec-runtime-semantics-classdefinitionevaluation
+ThrowCompletionOr<Value> ClassExpression::class_definition_evaluation(Interpreter& interpreter, GlobalObject& global_object, FlyString const& binding_name, FlyString const& class_name) const
+{
+    auto& vm = interpreter.vm();
+    auto* environment = vm.lexical_environment();
+    VERIFY(environment);
+    auto* class_scope = new_declarative_environment(*environment);
+    if (!binding_name.is_null())
+        class_scope->create_immutable_binding(global_object, binding_name, true);
+
+    ArmedScopeGuard restore_environment = [&] {
+        vm.running_execution_context().lexical_environment = environment;
+    };
+    vm.running_execution_context().lexical_environment = class_scope;
+
+    Value class_constructor_value = m_constructor->execute(interpreter, global_object);
+    if (auto* exception = interpreter.exception())
+        return throw_completion(exception->value());
+
+    update_function_name(class_constructor_value, class_name);
 
     VERIFY(class_constructor_value.is_function() && is<OrdinaryFunctionObject>(class_constructor_value.as_function()));
     auto* class_constructor = static_cast<OrdinaryFunctionObject*>(&class_constructor_value.as_function());
@@ -1010,59 +1061,58 @@ Value ClassExpression::execute(Interpreter& interpreter, GlobalObject& global_ob
     Value super_constructor = js_undefined();
     if (!m_super_class.is_null()) {
         super_constructor = m_super_class->execute(interpreter, global_object);
-        if (interpreter.exception())
-            return {};
-        if (!super_constructor.is_function() && !super_constructor.is_null()) {
-            interpreter.vm().throw_exception<TypeError>(global_object, ErrorType::ClassExtendsValueNotAConstructorOrNull, super_constructor.to_string_without_side_effects());
-            return {};
-        }
+        if (auto* exception = interpreter.exception())
+            return throw_completion(exception->value());
+
+        if (!super_constructor.is_function() && !super_constructor.is_null())
+            return interpreter.vm().throw_completion<TypeError>(global_object, ErrorType::ClassExtendsValueNotAConstructorOrNull, super_constructor.to_string_without_side_effects());
+
         class_constructor->set_constructor_kind(FunctionObject::ConstructorKind::Derived);
 
         Object* super_constructor_prototype = nullptr;
         if (!super_constructor.is_null()) {
             auto super_constructor_prototype_value = super_constructor.as_object().get(vm.names.prototype);
-            if (interpreter.exception())
-                return {};
-            if (!super_constructor_prototype_value.is_object() && !super_constructor_prototype_value.is_null()) {
-                interpreter.vm().throw_exception<TypeError>(global_object, ErrorType::ClassExtendsValueInvalidPrototype, super_constructor_prototype_value.to_string_without_side_effects());
-                return {};
-            }
+            if (auto* exception = interpreter.exception())
+                return throw_completion(exception->value());
+
+            if (!super_constructor_prototype_value.is_object() && !super_constructor_prototype_value.is_null())
+                return interpreter.vm().throw_completion<TypeError>(global_object, ErrorType::ClassExtendsValueInvalidPrototype, super_constructor_prototype_value.to_string_without_side_effects());
+
             if (super_constructor_prototype_value.is_object())
                 super_constructor_prototype = &super_constructor_prototype_value.as_object();
         }
         auto* prototype = Object::create(global_object, super_constructor_prototype);
 
         prototype->define_direct_property(vm.names.constructor, class_constructor, 0);
-        if (interpreter.exception())
-            return {};
+        if (auto* exception = interpreter.exception())
+            return throw_completion(exception->value());
         class_constructor->define_direct_property(vm.names.prototype, prototype, Attribute::Writable);
-        if (interpreter.exception())
-            return {};
+        if (auto* exception = interpreter.exception())
+            return throw_completion(exception->value());
         class_constructor->internal_set_prototype_of(super_constructor.is_null() ? global_object.function_prototype() : &super_constructor.as_object());
     }
 
     auto class_prototype = class_constructor->get(vm.names.prototype);
-    if (interpreter.exception())
-        return {};
+    if (auto* exception = interpreter.exception())
+        return throw_completion(exception->value());
 
-    if (!class_prototype.is_object()) {
-        interpreter.vm().throw_exception<TypeError>(global_object, ErrorType::NotAnObject, "Class prototype");
-        return {};
-    }
+    if (!class_prototype.is_object())
+        return interpreter.vm().throw_completion<TypeError>(global_object, ErrorType::NotAnObject, "Class prototype");
+
     for (auto const& method : m_methods) {
         auto method_value = method.execute(interpreter, global_object);
-        if (interpreter.exception())
-            return {};
+        if (auto* exception = interpreter.exception())
+            return throw_completion(exception->value());
 
         auto& method_function = method_value.as_function();
 
         auto key = method.key().execute(interpreter, global_object);
-        if (interpreter.exception())
-            return {};
+        if (auto* exception = interpreter.exception())
+            return throw_completion(exception->value());
 
         auto property_key = key.to_property_key(global_object);
-        if (interpreter.exception())
-            return {};
+        if (auto* exception = interpreter.exception())
+            return throw_completion(exception->value());
 
         auto& target = method.is_static() ? *class_constructor : class_prototype.as_object();
         method_function.set_home_object(&target);
@@ -1082,18 +1132,18 @@ Value ClassExpression::execute(Interpreter& interpreter, GlobalObject& global_ob
         default:
             VERIFY_NOT_REACHED();
         }
-        if (interpreter.exception())
-            return {};
+        if (auto* exception = interpreter.exception())
+            return throw_completion(exception->value());
     }
 
     for (auto& field : m_fields) {
         auto key = field.key().execute(interpreter, global_object);
-        if (interpreter.exception())
-            return {};
+        if (auto* exception = interpreter.exception())
+            return throw_completion(exception->value());
 
         auto property_key = key.to_property_key(global_object);
-        if (interpreter.exception())
-            return {};
+        if (auto* exception = interpreter.exception())
+            return throw_completion(exception->value());
 
         FunctionObject* initializer = nullptr;
         if (field.initializer()) {
@@ -1108,32 +1158,24 @@ Value ClassExpression::execute(Interpreter& interpreter, GlobalObject& global_ob
             Value field_value = js_undefined();
             if (initializer) {
                 field_value = interpreter.vm().call(*initializer, class_constructor_value);
-                if (interpreter.exception())
-                    return {};
+                if (auto* exception = interpreter.exception())
+                    return throw_completion(exception->value());
             }
 
             class_constructor->create_data_property_or_throw(property_key, field_value);
-            if (interpreter.exception())
-                return {};
+            if (auto* exception = interpreter.exception())
+                return throw_completion(exception->value());
         } else {
             class_constructor->add_field(property_key, initializer);
         }
     }
 
-    return class_constructor;
-}
+    vm.running_execution_context().lexical_environment = environment;
+    restore_environment.disarm();
+    if (!binding_name.is_null())
+        class_scope->initialize_binding(global_object, binding_name, class_constructor);
 
-Value ClassDeclaration::execute(Interpreter& interpreter, GlobalObject& global_object) const
-{
-    InterpreterNodeScope node_scope { interpreter, *this };
-
-    Value class_constructor = m_class_expression->execute(interpreter, global_object);
-    if (interpreter.exception())
-        return {};
-
-    interpreter.lexical_environment()->initialize_binding(global_object, m_class_expression->name(), class_constructor);
-
-    return {};
+    return Value(class_constructor);
 }
 
 static void print_indent(int indent)
@@ -1771,7 +1813,12 @@ Value AssignmentExpression::execute(Interpreter& interpreter, GlobalObject& glob
                 return {};
 
             if (m_op == AssignmentOp::Assignment) {
-                rhs_result = m_rhs->execute(interpreter, global_object);
+                if (lhs->is_identifier()) {
+                    auto& identifier_name = static_cast<Identifier const&>(*lhs).string();
+                    rhs_result = TRY_OR_DISCARD(interpreter.vm().named_evaluation_if_anonymous_function(global_object, m_rhs, identifier_name));
+                } else {
+                    rhs_result = m_rhs->execute(interpreter, global_object);
+                }
                 if (interpreter.exception())
                     return {};
             }
@@ -1930,12 +1977,12 @@ Value VariableDeclaration::execute(Interpreter& interpreter, GlobalObject& globa
                     auto reference = id->to_reference(interpreter, global_object);
                     if (interpreter.exception())
                         return;
-                    auto initializer_result = init->execute(interpreter, global_object);
-                    if (interpreter.exception())
+                    auto initializer_result_or_error = interpreter.vm().named_evaluation_if_anonymous_function(global_object, *init, id->string());
+                    if (initializer_result_or_error.is_error())
                         return;
+                    auto initializer_result = initializer_result_or_error.release_value();
                     VERIFY(!initializer_result.is_empty());
 
-                    // FIXME: Named eval
                     if (m_declaration_kind == DeclarationKind::Var)
                         reference.put_value(global_object, initializer_result);
                     else

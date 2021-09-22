@@ -137,6 +137,28 @@ Symbol* VM::get_global_symbol(const String& description)
     return new_global_symbol;
 }
 
+ThrowCompletionOr<Value> VM::named_evaluation_if_anonymous_function(GlobalObject& global_object, ASTNode const& expression, FlyString const& name)
+{
+    // 8.3.3 Static Semantics: IsAnonymousFunctionDefinition ( expr ), https://tc39.es/ecma262/#sec-isanonymousfunctiondefinition
+    // And 8.3.5 Runtime Semantics: NamedEvaluation, https://tc39.es/ecma262/#sec-runtime-semantics-namedevaluation
+    if (is<FunctionExpression>(expression)) {
+        auto& function = static_cast<FunctionExpression const&>(expression);
+        if (!function.has_name()) {
+            return function.instantiate_ordinary_function_expression(interpreter(), global_object, name);
+        }
+    } else if (is<ClassExpression>(expression)) {
+        auto& class_expression = static_cast<ClassExpression const&>(expression);
+        if (!class_expression.has_name()) {
+            return TRY(class_expression.class_definition_evaluation(interpreter(), global_object, {}, name));
+        }
+    }
+
+    auto value = expression.execute(interpreter(), global_object);
+    if (auto* thrown_exception = exception())
+        return JS::throw_completion(thrown_exception->value());
+    return value;
+}
+
 // 13.15.5.2 Runtime Semantics: DestructuringAssignmentEvaluation, https://tc39.es/ecma262/#sec-runtime-semantics-destructuringassignmentevaluation
 Completion VM::destructuring_assignment_evaluation(NonnullRefPtr<BindingPattern> const& target, Value value, GlobalObject& global_object)
 {
@@ -283,8 +305,7 @@ Completion VM::property_binding_initialization(BindingPattern const& binding, Va
                 return JS::throw_completion(thrown_exception->value());
 
             if (property.initializer && value_to_assign.is_undefined()) {
-                // FIXME: perform NamedEvaluation here if needed
-                value_to_assign = property.initializer->execute(interpreter(), global_object);
+                value_to_assign = TRY(named_evaluation_if_anonymous_function(global_object, *property.initializer, identifier.string()));
             }
 
             if (!environment)
@@ -313,17 +334,17 @@ Completion VM::property_binding_initialization(BindingPattern const& binding, Va
         if (auto* thrown_exception = exception())
             return JS::throw_completion(thrown_exception->value());
 
-        auto* binding_ptr = property.alias.get_pointer<NonnullRefPtr<BindingPattern>>();
-
         if (property.initializer && value_to_assign.is_undefined()) {
-            // FIXME: perform NamedEvaluation here if needed
-            value_to_assign = property.initializer->execute(interpreter(), global_object);
+            if (auto* identifier_ptr = property.alias.get_pointer<NonnullRefPtr<Identifier>>())
+                value_to_assign = TRY(named_evaluation_if_anonymous_function(global_object, *property.initializer, (*identifier_ptr)->string()));
+            else
+                value_to_assign = property.initializer->execute(interpreter(), global_object);
 
             if (auto* thrown_exception = exception())
                 return JS::throw_completion(thrown_exception->value());
         }
 
-        if (binding_ptr) {
+        if (auto* binding_ptr = property.alias.get_pointer<NonnullRefPtr<BindingPattern>>()) {
             TRY(binding_initialization(*binding_ptr, value_to_assign, environment, global_object));
         } else {
             VERIFY(reference_to_assign_to.has_value());
@@ -420,8 +441,11 @@ Completion VM::iterator_binding_initialization(BindingPattern const& binding, Ob
 
         if (value.is_undefined() && entry.initializer) {
             VERIFY(!entry.is_rest);
-            // FIXME: perform NamedEvaluation here if needed
-            value = entry.initializer->execute(interpreter(), global_object);
+            if (auto* identifier_ptr = entry.alias.get_pointer<NonnullRefPtr<Identifier>>())
+                value = TRY(named_evaluation_if_anonymous_function(global_object, *entry.initializer, (*identifier_ptr)->string()));
+            else
+                value = entry.initializer->execute(interpreter(), global_object);
+
             if (auto* thrown_exception = exception())
                 return JS::throw_completion(thrown_exception->value());
         }

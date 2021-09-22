@@ -435,25 +435,11 @@ public:
     virtual Value execute(Interpreter&, GlobalObject&) const override;
     virtual void dump(int indent) const override;
 
-    void set_name_if_possible(FlyString new_name)
-    {
-        if (m_cannot_auto_rename)
-            return;
-        m_cannot_auto_rename = true;
-        if (name().is_empty()) {
-            set_name(move(new_name));
-            m_is_auto_renamed = true;
-        }
-    }
-    bool cannot_auto_rename() const { return m_cannot_auto_rename; }
-    bool is_auto_renamed() const { return m_is_auto_renamed; }
-    void set_cannot_auto_rename() { m_cannot_auto_rename = true; }
-
     virtual void generate_bytecode(Bytecode::Generator&) const override;
 
-private:
-    bool m_cannot_auto_rename { false };
-    bool m_is_auto_renamed { false };
+    bool has_name() const { return !name().is_empty(); }
+
+    Value instantiate_ordinary_function_expression(Interpreter& interpreter, GlobalObject& global_object, FlyString given_name) const;
 };
 
 class ErrorExpression final : public Expression {
@@ -1005,6 +991,10 @@ public:
 
     virtual Value execute(Interpreter&, GlobalObject&) const override;
     virtual void dump(int indent) const override;
+
+    bool has_name() const { return !m_name.is_empty(); }
+
+    ThrowCompletionOr<Value> class_definition_evaluation(Interpreter& interpreter, GlobalObject& global_object, FlyString const& binding_name = {}, FlyString const& class_name = {}) const;
 
 private:
     String m_name;
