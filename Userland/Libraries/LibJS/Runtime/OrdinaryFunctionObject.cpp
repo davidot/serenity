@@ -201,6 +201,7 @@ Completion OrdinaryFunctionObject::function_declaration_instantiation(Interprete
                     var_names.set(name);
                 else if (name == vm.names.arguments.as_string())
                     needs_argument_object = false;
+                return IterationDecision::Continue;
             });
         }
 
@@ -352,6 +353,7 @@ Completion OrdinaryFunctionObject::function_declaration_instantiation(Interprete
                 lex_environment->create_immutable_binding(global_object(), name, true);
             else
                 lex_environment->create_mutable_binding(global_object(), name, false);
+            return IterationDecision::Continue;
         });
     }
 

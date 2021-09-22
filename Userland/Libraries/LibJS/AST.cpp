@@ -444,77 +444,100 @@ Value ForStatement::execute(Interpreter& interpreter, GlobalObject& global_objec
 {
     InterpreterNodeScope node_scope { interpreter, *this };
 
-    RefPtr<BlockStatement> wrapper;
+    // Note we don't always set a new environment but to use RAII we must do this here.
+    auto* old_environment = interpreter.lexical_environment();
+    ScopeGuard restore_old_environment = [&] {
+        interpreter.vm().running_execution_context().lexical_environment = old_environment;
+    };
 
-    if (m_init && is<VariableDeclaration>(*m_init) && static_cast<VariableDeclaration const&>(*m_init).declaration_kind() != DeclarationKind::Var) {
-        wrapper = create_ast_node<BlockStatement>(source_range());
-        NonnullRefPtrVector<VariableDeclaration> decls;
-        decls.append(*static_cast<VariableDeclaration const*>(m_init.ptr()));
-        wrapper->add_variables(decls);
-        interpreter.enter_scope(*wrapper, ScopeType::Block, global_object);
-    }
+    Vector<FlyString> let_declarations;
 
-    auto wrapper_cleanup = ScopeGuard([&] {
-        if (wrapper)
-            interpreter.exit_scope(*wrapper);
-    });
-
-    auto last_value = js_undefined();
     if (m_init) {
+        if (is<VariableDeclaration>(*m_init) && static_cast<VariableDeclaration const&>(*m_init).declaration_kind() != DeclarationKind::Var) {
+            auto* loop_environment = new_declarative_environment(*old_environment);
+            auto& declaration = static_cast<VariableDeclaration const&>(*m_init);
+            declaration.for_each_bound_name([&](auto const& name) {
+                if (declaration.declaration_kind() == DeclarationKind::Const) {
+                    loop_environment->create_immutable_binding(global_object, name, true);
+                } else {
+                    loop_environment->create_mutable_binding(global_object, name, false);
+                    let_declarations.append(name);
+                }
+                return IterationDecision::Continue;
+            });
+
+            interpreter.vm().running_execution_context().lexical_environment = loop_environment;
+        }
+
         m_init->execute(interpreter, global_object);
         if (interpreter.exception())
             return {};
     }
 
-    if (m_test) {
-        while (true) {
-            auto test_result = m_test->execute(interpreter, global_object);
-            if (interpreter.exception())
-                return {};
-            if (!test_result.to_boolean())
+    auto last_value = js_undefined();
+
+    // 14.7.4.4 CreatePerIterationEnvironment ( perIterationBindings ), https://tc39.es/ecma262/#sec-createperiterationenvironment
+    auto create_per_iteration_environment = [&] {
+        if (let_declarations.is_empty())
+            return normal_completion({});
+
+        auto* last_iteration_env = interpreter.lexical_environment();
+        auto* outer = last_iteration_env->outer_environment();
+        VERIFY(outer);
+        auto* this_iteration_env = new_declarative_environment(*outer);
+        for (auto& name : let_declarations) {
+            this_iteration_env->create_mutable_binding(global_object, name, false);
+            auto last_value = last_iteration_env->get_binding_value(global_object, name, true);
+            if (auto* exception = interpreter.exception())
+                return throw_completion(exception->value());
+            VERIFY(!last_value.is_empty());
+            this_iteration_env->initialize_binding(global_object, name, last_value);
+        }
+        interpreter.vm().running_execution_context().lexical_environment = this_iteration_env;
+
+        return normal_completion({});
+    };
+
+    TRY_OR_DISCARD(create_per_iteration_environment());
+
+    auto test_empty_or_true = [&] {
+        if (!m_test)
+            return true;
+
+        auto test_result = m_test->execute(interpreter, global_object);
+        if (interpreter.exception())
+            return false;
+        return test_result.to_boolean();
+    };
+
+    while (true) {
+        if (!test_empty_or_true())
+            break;
+
+        last_value = interpreter.execute_statement(global_object, *m_body).value_or(last_value);
+        if (interpreter.exception())
+            return {};
+        if (interpreter.vm().should_unwind()) {
+            if (interpreter.vm().should_unwind_until(ScopeType::Continuable, m_labels)) {
+                interpreter.vm().stop_unwind();
+            } else if (interpreter.vm().should_unwind_until(ScopeType::Breakable, m_labels)) {
+                interpreter.vm().stop_unwind();
                 break;
-            last_value = interpreter.execute_statement(global_object, *m_body).value_or(last_value);
-            if (interpreter.exception())
-                return {};
-            if (interpreter.vm().should_unwind()) {
-                if (interpreter.vm().should_unwind_until(ScopeType::Continuable, m_labels)) {
-                    interpreter.vm().stop_unwind();
-                } else if (interpreter.vm().should_unwind_until(ScopeType::Breakable, m_labels)) {
-                    interpreter.vm().stop_unwind();
-                    break;
-                } else {
-                    return last_value;
-                }
-            }
-            if (m_update) {
-                m_update->execute(interpreter, global_object);
-                if (interpreter.exception())
-                    return {};
+            } else {
+                return last_value;
             }
         }
-    } else {
-        while (true) {
-            last_value = interpreter.execute_statement(global_object, *m_body).value_or(last_value);
+
+        TRY_OR_DISCARD(create_per_iteration_environment());
+
+        if (m_update) {
+            m_update->execute(interpreter, global_object);
             if (interpreter.exception())
                 return {};
-            if (interpreter.vm().should_unwind()) {
-                if (interpreter.vm().should_unwind_until(ScopeType::Continuable, m_labels)) {
-                    interpreter.vm().stop_unwind();
-                } else if (interpreter.vm().should_unwind_until(ScopeType::Breakable, m_labels)) {
-                    interpreter.vm().stop_unwind();
-                    break;
-                } else {
-                    return last_value;
-                }
-            }
-            if (m_update) {
-                m_update->execute(interpreter, global_object);
-                if (interpreter.exception())
-                    return {};
-            }
         }
     }
-
+    if (interpreter.exception())
+        return {};
     return last_value;
 }
 
@@ -575,6 +598,7 @@ struct ForInOfHeadState {
                     iteration_environment->create_immutable_binding(global_object, name, false);
                 else
                     iteration_environment->create_mutable_binding(global_object, name, true);
+                return IterationDecision::Continue;
             });
             interpreter.vm().running_execution_context().lexical_environment = iteration_environment;
 
@@ -627,6 +651,7 @@ static ForInOfHeadState for_in_of_head_execute(Interpreter& interpreter, GlobalO
             new_environment = new_declarative_environment(*interpreter.lexical_environment());
             variable_declaration.for_each_bound_name([&](auto const& name) {
                 new_environment->create_mutable_binding(global_object, name, false);
+                return IterationDecision::Continue;
             });
         }
         if (new_environment) {
@@ -1941,6 +1966,21 @@ Value VariableDeclarator::execute(Interpreter& interpreter, GlobalObject&) const
 
     // NOTE: VariableDeclarator execution is handled by VariableDeclaration.
     VERIFY_NOT_REACHED();
+}
+
+void VariableDeclaration::for_each_bound_name(Function<IterationDecision(FlyString const&)> callback) const
+{
+    for (auto& entry : declarations()) {
+        entry.target().template visit(
+            [&](const NonnullRefPtr<Identifier>& id) {
+                callback(id->string());
+            },
+            [&](const NonnullRefPtr<BindingPattern>& binding) {
+                binding->for_each_bound_name([&](const auto& name) {
+                    callback(name);
+                });
+            });
+    }
 }
 
 void VariableDeclaration::dump(int indent) const

@@ -1241,21 +1241,7 @@ public:
 
     NonnullRefPtrVector<VariableDeclarator> const& declarations() const { return m_declarations; }
 
-    template<typename Callback>
-    void for_each_bound_name(Callback&& callback) const
-    {
-        for (auto& entry : declarations()) {
-            entry.target().template visit(
-                [&](const NonnullRefPtr<Identifier>& id) {
-                    callback(id->string());
-                },
-                [&](const NonnullRefPtr<BindingPattern>& binding) {
-                    binding->for_each_bound_name([&](const auto& name) {
-                        callback(name);
-                    });
-                });
-        }
-    }
+    void for_each_bound_name(Function<IterationDecision(FlyString const&)> callback) const;
 
 private:
     DeclarationKind m_declaration_kind;
