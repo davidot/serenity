@@ -280,6 +280,8 @@ public:
     NonnullRefPtrVector<ImportStatement> const& imports() const { return m_imports; }
     NonnullRefPtrVector<ExportStatement> const& exports() const { return m_exports; }
 
+    Completion global_declaration_instantiation(Interpreter& interpreter, GlobalObject& global_object, GlobalEnvironment& global_environment) const;
+
 private:
     virtual bool is_program() const override { return true; }
 
@@ -296,6 +298,8 @@ public:
         : ScopeNode(source_range)
     {
     }
+
+    void block_declaration_instantiation(GlobalObject& global_object, Environment* environment) const;
 };
 
 class Expression : public ASTNode {

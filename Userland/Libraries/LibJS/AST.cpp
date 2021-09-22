@@ -90,6 +90,12 @@ Value ScopeNode::execute(Interpreter& interpreter, GlobalObject& global_object) 
 Value Program::execute(Interpreter& interpreter, GlobalObject& global_object) const
 {
     InterpreterNodeScope node_scope { interpreter, *this };
+
+    VERIFY(interpreter.lexical_environment() && interpreter.lexical_environment()->is_global_environment());
+    auto& global_env = static_cast<GlobalEnvironment&>(*interpreter.lexical_environment());
+
+    TRY_OR_DISCARD(global_declaration_instantiation(interpreter, global_object, global_env));
+
     return interpreter.execute_statement(global_object, *this, ScopeType::Block);
 }
 
@@ -2860,6 +2866,111 @@ void BlockStatement::block_declaration_instantiation(GlobalObject& global_object
         environment->initialize_binding(global_object, declaration.name(), function);
         // FIXME: Last step is replaced in AnnexB section 3.2.6
     }
+}
+
+// 16.1.7 GlobalDeclarationInstantiation ( script, env ), https://tc39.es/ecma262/#sec-globaldeclarationinstantiation
+Completion Program::global_declaration_instantiation(Interpreter& interpreter, GlobalObject& global_object, GlobalEnvironment& global_environment) const
+{
+    Completion completion = normal_completion({});
+    for (auto& declaration : variables()) {
+        if (declaration.declaration_kind() == DeclarationKind::Var) {
+            declaration.for_each_bound_name([&](auto const& name) {
+                if (global_environment.has_lexical_declaration(name)) {
+                    interpreter.vm().throw_exception<SyntaxError>(global_object, ErrorType::FixmeAddAnErrorStringWithMessage, "Var declared variable top level also lexically declared");
+                    return IterationDecision::Break;
+                }
+
+                return IterationDecision::Continue;
+            });
+        } else {
+            declaration.for_each_bound_name([&](auto const& name) {
+                if (global_environment.has_var_declaration(name) || global_environment.has_lexical_declaration(name)) {
+                    interpreter.vm().throw_exception<SyntaxError>(global_object, ErrorType::FixmeAddAnErrorStringWithMessage, "Lexical variable top level already declared");
+                    return IterationDecision::Break;
+                }
+
+                auto restricted_global = global_environment.has_restricted_global_property(name);
+                if (interpreter.exception())
+                    return IterationDecision::Break;
+
+                if (restricted_global)
+                    interpreter.vm().throw_exception<SyntaxError>(global_object, ErrorType::FixmeAddAnErrorStringWithMessage, "Resticted global property");
+
+                return IterationDecision::Continue;
+            });
+        }
+
+        if (auto* exception = interpreter.exception())
+            return throw_completion(exception->value());
+    }
+
+    HashTable<FlyString> declared_function_names;
+
+    for (auto& function : functions()) {
+        if (declared_function_names.set(function.name()) != AK::HashSetResult::InsertedNewEntry)
+            continue;
+        auto function_definable = global_environment.can_declare_global_function(function.name());
+        if (auto* exception = interpreter.exception())
+            return throw_completion(exception->value());
+        if (!function_definable)
+            return interpreter.vm().throw_completion<TypeError>(global_object, ErrorType::FixmeAddAnErrorStringWithMessage, "Global function not definable");
+
+        // FIXME: NOTE: If there are multiple function declarations for the same name, the last declaration is used.
+    }
+
+    for (auto& variable : variables()) {
+        if (variable.declaration_kind() != DeclarationKind::Var)
+            continue;
+
+        variable.for_each_bound_name([&](auto const& name) {
+            auto var_definable = global_environment.can_declare_global_var(name);
+            if (interpreter.exception())
+                return IterationDecision::Break;
+
+            if (!var_definable) {
+                interpreter.vm().throw_exception<TypeError>(global_object, ErrorType::FixmeAddAnErrorStringWithMessage, "Global variable not definable");
+                return IterationDecision::Break;
+            }
+
+            return IterationDecision::Continue;
+        });
+    }
+
+    // FIXME: Add step AnnexB section 3.2.2
+
+    // In the spec the order is 1. lexical, 2. functions, 3. var but for simplicity we move var up
+    for (auto& variable : variables()) {
+        variable.for_each_bound_name([&](auto const& name) {
+            switch (variable.declaration_kind()) {
+            case DeclarationKind::Const:
+                global_environment.create_immutable_binding(global_object, name, true);
+                break;
+            case DeclarationKind::Let:
+                global_environment.create_mutable_binding(global_object, name, false);
+                break;
+            case DeclarationKind::Var:
+                global_environment.create_global_var_binding(name, false);
+                break;
+            }
+
+            if (interpreter.exception())
+                return IterationDecision::Break;
+
+            return IterationDecision::Continue;
+        });
+        if (auto* exception = interpreter.exception())
+            return throw_completion(exception->value());
+    }
+
+    // FIXME: NOTE: If there are multiple function declarations for the same name, the last declaration is used.
+    for (auto& declaration : functions()) {
+        auto* function = OrdinaryFunctionObject::create(global_object, declaration.name(), declaration.body(), declaration.parameters(), declaration.function_length(), &global_environment, declaration.kind(), declaration.is_strict_mode());
+        global_environment.create_global_function_binding(declaration.name(), function, false);
+        if (auto* exception = interpreter.exception())
+            return throw_completion(exception->value());
+    }
+
+    return completion;
 }
 
 }
