@@ -25,6 +25,7 @@
 #include <LibJS/Runtime/GlobalObject.h>
 #include <LibJS/Runtime/Object.h>
 #include <LibJS/Runtime/ObjectEnvironment.h>
+#include <LibJS/Runtime/OrdinaryFunctionObject.h>
 #include <LibJS/Runtime/PropertyDescriptor.h>
 #include <LibJS/Runtime/PropertyName.h>
 #include <LibJS/Runtime/ProxyObject.h>
@@ -414,6 +415,8 @@ ThrowCompletionOr<Value> perform_eval(Value x, GlobalObject& caller_realm, Calle
         return x;
 
     auto& vm = caller_realm.vm();
+    auto& eval_realm = vm.running_execution_context().realm;
+
     auto& code_string = x.as_string();
     Parser parser { Lexer { code_string.string() } };
     auto program = parser.parse_program(strict_caller == CallerMode::Strict);
@@ -423,20 +426,194 @@ ThrowCompletionOr<Value> perform_eval(Value x, GlobalObject& caller_realm, Calle
         return vm.throw_completion<SyntaxError>(caller_realm, error.to_string());
     }
 
-    auto& interpreter = vm.interpreter();
-    if (direct == EvalMode::Direct) {
-        auto result = interpreter.execute_statement(caller_realm, program).value_or(js_undefined());
-        if (auto* exception = vm.exception())
-            return throw_completion(exception->value());
-        return result;
+    auto strict_eval = strict_caller == CallerMode::Strict;
+    if (program->is_strict_mode()) {
+        strict_eval = true;
     }
 
-    TemporaryChange scope_change(vm.running_execution_context().lexical_environment, static_cast<Environment*>(&interpreter.realm().global_environment()));
-    TemporaryChange scope_change_strict(vm.running_execution_context().is_strict_mode, strict_caller == CallerMode::Strict);
-    auto result = interpreter.execute_statement(caller_realm, program).value_or(js_undefined());
-    if (auto* exception = vm.exception())
-        return throw_completion(exception->value());
+    auto& running_context = vm.running_execution_context();
+
+    Environment* lexical_environment;
+    Environment* variable_environment;
+    if (direct == EvalMode::Direct) {
+        lexical_environment = new_declarative_environment(*running_context.lexical_environment);
+        variable_environment = running_context.variable_environment;
+    } else {
+        lexical_environment = new_declarative_environment(eval_realm->global_environment());
+        variable_environment = &eval_realm->global_environment();
+    }
+
+    if (strict_eval)
+        variable_environment = lexical_environment;
+
+    // 18. If runningContext is not already suspended, suspend runningContext.
+    // FIXME: We don't have this concept yet.
+
+    ExecutionContext eval_context(vm.heap());
+    eval_context.realm = eval_realm;
+    eval_context.variable_environment = variable_environment;
+    eval_context.lexical_environment = variable_environment;
+    vm.push_execution_context(eval_context, eval_realm->global_object());
+
+    auto result = eval_declaration_instantiation(vm, eval_realm->global_object(), program, variable_environment, lexical_environment, strict_eval);
+    if (result.type() == Completion::Type::Normal) {
+        auto& interpreter = vm.interpreter();
+        TemporaryChange scope_change_strict(vm.running_execution_context().is_strict_mode, strict_caller == CallerMode::Strict);
+        auto eval_result = interpreter.execute_statement(caller_realm, program);
+        if (auto* exception = vm.exception())
+            result = throw_completion(exception->value());
+        else
+            result = normal_completion(eval_result.value_or(js_undefined()));
+    }
+
+    vm.pop_execution_context();
+
+    if (result.type() == Completion::Type::Normal) {
+        VERIFY(!result.value().is_empty());
+        return result.release_value();
+    }
     return result;
+}
+
+// 19.2.1.3 EvalDeclarationInstantiation ( body, varEnv, lexEnv, privateEnv, strict ), https://tc39.es/ecma262/#sec-evaldeclarationinstantiation
+Completion eval_declaration_instantiation(VM& vm, GlobalObject& global_object, Program const& program, Environment* variable_environment, Environment* lexical_environment, bool strict)
+{
+
+    // FIXME: I'm not sure if the global object is correct here. And this is quite a crucial spot!
+    GlobalEnvironment* global_var_environment = variable_environment->is_global_environment() ? static_cast<GlobalEnvironment*>(variable_environment) : nullptr;
+
+    if (!strict) {
+
+        HashTable<FlyString> var_names;
+        for (auto& declaration : program.variables()) {
+            if (declaration.declaration_kind() != DeclarationKind::Var)
+                continue;
+            declaration.for_each_bound_name([&](auto const& name) {
+                var_names.set(name);
+                return IterationDecision::Continue;
+            });
+        }
+
+        if (global_var_environment) {
+            for (auto& name : var_names) {
+                if (global_var_environment->has_lexical_declaration(name)) {
+                    return vm.throw_completion<SyntaxError>(global_object, ErrorType::FixmeAddAnErrorStringWithMessage, "Var already declared lexically");
+                }
+            }
+        }
+
+        auto* this_environment = lexical_environment;
+        while (this_environment != variable_environment) {
+
+            if (!is<ObjectEnvironment>(*this_environment)) {
+                for (auto& name : var_names) {
+                    if (this_environment->has_binding(name)) {
+                        return vm.throw_completion<SyntaxError>(global_object, ErrorType::FixmeAddAnErrorStringWithMessage, "Var already declared lexically");
+                    }
+                    // FIXME: NOTE: Annex B.3.4 defines alternate semantics for the above step.
+                }
+            }
+
+            this_environment = this_environment->outer_environment();
+            VERIFY(this_environment);
+        }
+    }
+
+    HashTable<FlyString> declared_function_names;
+
+    // FIXME: NOTE: If there are multiple function declarations for the same name, the last declaration is used.
+    for (auto& function : program.functions()) {
+        if (declared_function_names.set(function.name()) != AK::HashSetResult::InsertedNewEntry)
+            continue;
+
+        if (global_var_environment) {
+            auto function_definable = global_var_environment->can_declare_global_function(function.name());
+            if (auto* exception = vm.exception())
+                return throw_completion(exception->value());
+            if (!function_definable)
+                return vm.throw_completion<SyntaxError>(global_object, ErrorType::FixmeAddAnErrorStringWithMessage, "Cannot define global function");
+        }
+    }
+
+    // FIXME: Add step AnnexB section 3.2.3
+
+    HashTable<FlyString> declared_var_names;
+    for (auto& declaration : program.variables()) {
+        if (declaration.declaration_kind() != DeclarationKind::Var)
+            continue;
+        declaration.for_each_bound_name([&](auto const& name) {
+            if (!declared_function_names.contains(name)) {
+                if (global_var_environment) {
+                    auto variable_definable = global_var_environment->can_declare_global_var(name);
+                    if (auto* exception = vm.exception())
+                        return IterationDecision::Break;
+                    if (!variable_definable) {
+                        vm.throw_exception<SyntaxError>(global_object, ErrorType::FixmeAddAnErrorStringWithMessage, "Cannot define global function");
+                        return IterationDecision::Break;
+                    }
+                }
+                declared_var_names.set(name);
+            }
+            return IterationDecision::Continue;
+        });
+    }
+
+    for (auto& variable : program.variables()) {
+        variable.for_each_bound_name([&](auto const& name) {
+            switch (variable.declaration_kind()) {
+            case DeclarationKind::Const:
+                lexical_environment->create_immutable_binding(global_object, name, true);
+                break;
+            case DeclarationKind::Let:
+                lexical_environment->create_mutable_binding(global_object, name, false);
+                break;
+            case DeclarationKind::Var:
+                break;
+            }
+
+            if (vm.exception())
+                return IterationDecision::Break;
+
+            return IterationDecision::Continue;
+        });
+        if (auto* exception = vm.exception())
+            return throw_completion(exception->value());
+    }
+
+    // FIXME: NOTE: If there are multiple function declarations for the same name, the last declaration is used.
+    for (auto& declaration : program.functions()) {
+        auto* function = OrdinaryFunctionObject::create(global_object, declaration.name(), declaration.body(), declaration.parameters(), declaration.function_length(), lexical_environment, declaration.kind(), declaration.is_strict_mode());
+        if (global_var_environment) {
+            global_var_environment->create_global_function_binding(declaration.name(), function, true);
+        } else {
+            auto binding_exists = variable_environment->has_binding(declaration.name());
+
+            if (!binding_exists) {
+                variable_environment->create_mutable_binding(global_object, declaration.name(), true);
+                VERIFY(!vm.exception());
+                variable_environment->initialize_binding(global_object, declaration.name(), function);
+            } else {
+                variable_environment->set_mutable_binding(global_object, declaration.name(), function, false);
+            }
+            VERIFY(!vm.exception());
+        }
+    }
+
+    for (auto& var_name : declared_var_names) {
+        if (global_var_environment) {
+            global_var_environment->create_global_var_binding(var_name, true);
+        } else {
+            auto binding_exists = variable_environment->has_binding(var_name);
+
+            if (!binding_exists) {
+                variable_environment->create_mutable_binding(global_object, var_name, true);
+                VERIFY(!vm.exception());
+                variable_environment->initialize_binding(global_object, var_name, js_undefined());
+            }
+        }
+    }
+
+    return normal_completion({});
 }
 
 // 10.4.4.6 CreateUnmappedArgumentsObject ( argumentsList ), https://tc39.es/ecma262/#sec-createunmappedargumentsobject
