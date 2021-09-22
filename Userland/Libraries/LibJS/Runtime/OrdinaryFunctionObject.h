@@ -46,6 +46,8 @@ private:
     virtual FunctionEnvironment* create_environment(FunctionObject&) override;
     virtual void visit_edges(Visitor&) override;
 
+    Completion function_declaration_instantiation(Interpreter* interpreter);
+
     Value execute_function_body();
 
     FlyString m_name;

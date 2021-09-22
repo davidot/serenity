@@ -346,6 +346,8 @@ struct BindingPattern : RefCounted<BindingPattern> {
     template<typename C>
     void for_each_bound_name(C&& callback) const;
 
+    bool contains_expression() const;
+
     Vector<BindingEntry> entries;
     Kind kind { Kind::Object };
 };
@@ -1238,6 +1240,22 @@ public:
     virtual void generate_bytecode(Bytecode::Generator&) const override;
 
     NonnullRefPtrVector<VariableDeclarator> const& declarations() const { return m_declarations; }
+
+    template<typename Callback>
+    void for_each_bound_name(Callback&& callback) const
+    {
+        for (auto& entry : declarations()) {
+            entry.target().template visit(
+                [&](const NonnullRefPtr<Identifier>& id) {
+                    callback(id->string());
+                },
+                [&](const NonnullRefPtr<BindingPattern>& binding) {
+                    binding->for_each_bound_name([&](const auto& name) {
+                        callback(name);
+                    });
+                });
+        }
+    }
 
 private:
     DeclarationKind m_declaration_kind;

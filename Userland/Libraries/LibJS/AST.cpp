@@ -1319,6 +1319,17 @@ void NullLiteral::dump(int indent) const
     outln("null");
 }
 
+bool BindingPattern::contains_expression() const
+{
+    for (auto& entry : entries) {
+        if (entry.initializer)
+            return true;
+        if (auto binding_ptr = entry.alias.get_pointer<NonnullRefPtr<BindingPattern>>(); binding_ptr && (*binding_ptr)->contains_expression())
+            return true;
+    }
+    return false;
+}
+
 void BindingPattern::dump(int indent) const
 {
     print_indent(indent);

@@ -11,6 +11,7 @@
 #include <LibJS/Bytecode/Generator.h>
 #include <LibJS/Bytecode/Interpreter.h>
 #include <LibJS/Interpreter.h>
+#include <LibJS/Runtime/AbstractOperations.h>
 #include <LibJS/Runtime/Array.h>
 #include <LibJS/Runtime/Error.h>
 #include <LibJS/Runtime/FunctionEnvironment.h>
@@ -140,58 +141,238 @@ FunctionEnvironment* OrdinaryFunctionObject::create_environment(FunctionObject& 
     return environment;
 }
 
-Value OrdinaryFunctionObject::execute_function_body()
+// 10.2.11 FunctionDeclarationInstantiation ( func, argumentsList ), https://tc39.es/ecma262/#sec-functiondeclarationinstantiation
+Completion OrdinaryFunctionObject::function_declaration_instantiation(Interpreter* interpreter)
 {
     auto& vm = this->vm();
 
-    Interpreter* ast_interpreter = nullptr;
+    auto& callee_context = vm.running_execution_context();
+    auto needs_argument_object = this_mode() != ThisMode::Lexical;
+
+    // Needed to extract declarations and functions
+    ScopeNode const* block_body = nullptr;
+    if (is<ScopeNode>(*m_body))
+        block_body = static_cast<ScopeNode const*>(m_body.ptr());
+
+    bool has_parameter_expressions = false;
+
+    // FIXME: Maybe compute has duplicates at parse time? (We need to anyway since it's an error in some cases)
+
+    bool has_duplicates = false;
+    HashTable<FlyString> parameter_names;
+    for (auto& parameter : m_parameters) {
+        if (parameter.default_value)
+            has_parameter_expressions = true;
+
+        parameter.binding.visit(
+            [&](FlyString const& name) {
+                if (parameter_names.set(name) != AK::HashSetResult::InsertedNewEntry)
+                    has_duplicates = true;
+            },
+            [&](NonnullRefPtr<BindingPattern> const& pattern) {
+                if (pattern->contains_expression())
+                    has_parameter_expressions = true;
+
+                pattern->for_each_bound_name([&](auto& name) {
+                    if (parameter_names.set(name) != AK::HashSetResult::InsertedNewEntry)
+                        has_duplicates = true;
+                });
+            });
+    }
+
+    if (parameter_names.contains(vm.names.arguments.as_string()))
+        needs_argument_object = false;
+
+    HashTable<FlyString> var_names;
+
+    // FIXME: I think this is wrong and we need to only store the last function per name somehow??
+    // See Note in step 14.a.iii.2
+    HashTable<FlyString> function_names;
+    if (needs_argument_object && !has_parameter_expressions && block_body) {
+        for (auto& function : block_body->functions()) {
+            var_names.set(function.name());
+            function_names.set(function.name());
+        }
+
+        for (auto& declaration : block_body->variables()) {
+            auto is_var = declaration.declaration_kind() == DeclarationKind::Var;
+            declaration.for_each_bound_name([&](auto const& name) {
+                if (is_var)
+                    var_names.set(name);
+                else if (name == vm.names.arguments.as_string())
+                    needs_argument_object = false;
+            });
+        }
+
+        if (var_names.contains(vm.names.arguments.as_string()))
+            needs_argument_object = false;
+    }
+
+    Environment* environment;
+
+    if (is_strict_mode() || !has_parameter_expressions) {
+        environment = callee_context.lexical_environment;
+    } else {
+        environment = new_declarative_environment(*callee_context.lexical_environment);
+        VERIFY(callee_context.variable_environment == callee_context.lexical_environment);
+        callee_context.lexical_environment = environment;
+    }
+
+    for (auto const& parameter_name : parameter_names) {
+        if (environment->has_binding(parameter_name))
+            continue;
+
+        environment->create_mutable_binding(global_object(), parameter_name, false);
+        if (has_duplicates)
+            environment->initialize_binding(global_object(), parameter_name, js_undefined());
+        VERIFY(!vm.exception());
+    }
+
+    if (needs_argument_object) {
+        Object* arguments_object;
+        if (is_strict_mode() || !has_simple_parameter_list())
+            arguments_object = create_unmapped_arguments_object(global_object(), vm.running_execution_context().arguments);
+        else
+            arguments_object = create_mapped_arguments_object(global_object(), *this, parameters(), vm.running_execution_context().arguments, *environment);
+
+        if (is_strict_mode())
+            environment->create_immutable_binding(global_object(), vm.names.arguments.as_string(), false);
+        else
+            environment->create_mutable_binding(global_object(), vm.names.arguments.as_string(), false);
+
+        environment->initialize_binding(global_object(), vm.names.arguments.as_string(), arguments_object);
+        parameter_names.set(vm.names.arguments.as_string());
+    }
+
+    // We now treat parameterBindings as parameterNames.
+
+    // The spec makes an iterator here to do IteratorBindingInitialization but we just do it manually
+    auto& execution_context_arguments = vm.running_execution_context().arguments;
+
+    for (size_t i = 0; i < m_parameters.size(); ++i) {
+        auto& parameter = m_parameters[i];
+        parameter.binding.visit(
+            [&](auto const& param) {
+                Value argument_value;
+                if (parameter.is_rest) {
+                    auto* array = Array::create(global_object(), 0);
+                    for (size_t rest_index = i; rest_index < execution_context_arguments.size(); ++rest_index)
+                        array->indexed_properties().append(execution_context_arguments[rest_index]);
+                    argument_value = move(array);
+                } else if (i < execution_context_arguments.size() && !execution_context_arguments[i].is_undefined()) {
+                    argument_value = execution_context_arguments[i];
+                } else if (parameter.default_value) {
+                    // FIXME: Support default arguments in the bytecode world!
+                    if (interpreter)
+                        argument_value = parameter.default_value->execute(*interpreter, global_object());
+                    if (vm.exception())
+                        return;
+                } else {
+                    argument_value = js_undefined();
+                }
+
+                Environment* used_environment = has_duplicates ? nullptr : environment;
+
+                if constexpr (IsSame<FlyString const&, decltype(param)>) {
+                    Reference reference = vm.resolve_binding(param, used_environment);
+                    if (vm.exception())
+                        return;
+                    // Here the difference from hasDuplicates is important
+                    if (has_duplicates)
+                        reference.put_value(global_object(), argument_value);
+                    else
+                        reference.initialize_referenced_binding(global_object(), argument_value);
+                } else if (IsSame<NonnullRefPtr<BindingPattern> const&, decltype(param)>) {
+                    // Here the difference from hasDuplicates is important
+                    auto result = vm.binding_initialization(param, argument_value, used_environment, global_object());
+                    if (result.is_error())
+                        return;
+                }
+
+                if (vm.exception())
+                    return;
+            });
+
+        if (auto* exception = vm.exception())
+            return throw_completion(exception->value());
+    }
+
+    Environment* var_environment;
+
+    if (!has_parameter_expressions) {
+        for (auto& name : var_names) {
+            if (parameter_names.contains(name))
+                continue;
+
+            environment->create_mutable_binding(global_object(), name, false);
+            environment->initialize_binding(global_object(), name, js_undefined());
+        }
+        var_environment = environment;
+    } else {
+        var_environment = new_declarative_environment(*environment);
+        callee_context.variable_environment = var_environment;
+
+        HashTable<FlyString> instantiated_var_names;
+
+        for (auto& name : var_names) {
+            if (instantiated_var_names.set(name, AK::HashSetExistingEntryBehavior::Keep) != AK::HashSetResult::InsertedNewEntry)
+                continue;
+
+            var_environment->create_mutable_binding(global_object(), name, false);
+            Value initial_value;
+            if (!parameter_names.contains(name) || function_names.contains(name))
+                initial_value = js_undefined();
+            else
+                initial_value = environment->get_binding_value(global_object(), name, false);
+            var_environment->initialize_binding(global_object(), name, initial_value);
+        }
+    }
+
+    // B.3.2.1 Changes to FunctionDeclarationInstantiation, https://tc39.es/ecma262/#sec-web-compat-functiondeclarationinstantiation
+    // FIXME: WHAT? what is initializedBindings and how do we know we dont step on that error....
+
+    Environment* lex_environment;
+
+    if (!is_strict_mode())
+        lex_environment = new_declarative_environment(*var_environment);
+    else
+        lex_environment = var_environment;
+
+    callee_context.lexical_environment = lex_environment;
+
+    if (!block_body)
+        return normal_completion({});
+
+    for (auto& declaration : block_body->variables()) {
+        if (declaration.declaration_kind() == DeclarationKind::Var)
+            continue;
+
+        declaration.for_each_bound_name([&](auto const& name) {
+            if (declaration.declaration_kind() == DeclarationKind::Const)
+                lex_environment->create_immutable_binding(global_object(), name, true);
+            else
+                lex_environment->create_mutable_binding(global_object(), name, false);
+        });
+    }
+
+    // FIXME: Do something with private environments here.
+
+    for (auto& declaration : block_body->functions()) {
+        auto* function = OrdinaryFunctionObject::create(global_object(), declaration.name(), declaration.body(), declaration.parameters(), declaration.function_length(), lex_environment, declaration.kind(), declaration.is_strict_mode());
+        var_environment->set_mutable_binding(global_object(), declaration.name(), function, false);
+    }
+
+    return normal_completion({});
+}
+
+Value OrdinaryFunctionObject::execute_function_body()
+{
+    auto& vm = this->vm();
     auto* bytecode_interpreter = Bytecode::Interpreter::current();
 
-    auto prepare_arguments = [&] {
-        auto& execution_context_arguments = vm.running_execution_context().arguments;
-        for (size_t i = 0; i < m_parameters.size(); ++i) {
-            auto& parameter = m_parameters[i];
-            parameter.binding.visit(
-                [&](const auto& param) {
-                    Value argument_value;
-                    if (parameter.is_rest) {
-                        auto* array = Array::create(global_object(), 0);
-                        for (size_t rest_index = i; rest_index < execution_context_arguments.size(); ++rest_index)
-                            array->indexed_properties().append(execution_context_arguments[rest_index]);
-                        argument_value = move(array);
-                    } else if (i < execution_context_arguments.size() && !execution_context_arguments[i].is_undefined()) {
-                        argument_value = execution_context_arguments[i];
-                    } else if (parameter.default_value) {
-                        // FIXME: Support default arguments in the bytecode world!
-                        if (!bytecode_interpreter)
-                            argument_value = parameter.default_value->execute(*ast_interpreter, global_object());
-                        if (vm.exception())
-                            return;
-                    } else {
-                        argument_value = js_undefined();
-                    }
-
-                    if constexpr (IsSame<FlyString const&, decltype(param)>) {
-                        Reference reference = vm.resolve_binding(param, vm.running_execution_context().lexical_environment);
-                        if (vm.exception())
-                            return;
-                        // Here the difference from hasDuplicates is important
-                        reference.initialize_referenced_binding(global_object(), argument_value);
-                    } else if (IsSame<NonnullRefPtr<BindingPattern> const&, decltype(param)>) {
-                        // Here the difference from hasDuplicates is important
-                        auto result = vm.binding_initialization(param, argument_value, vm.running_execution_context().lexical_environment, global_object());
-                        if (result.is_error())
-                            return;
-                    }
-                });
-
-            if (vm.exception())
-                return;
-        }
-    };
-
     if (bytecode_interpreter) {
-        prepare_arguments();
+        // FIXME: pass something to evaluate default arguments with
+        TRY_OR_DISCARD(function_declaration_instantiation(nullptr));
         if (!m_bytecode_executable.has_value()) {
             m_bytecode_executable = Bytecode::Generator::generate(m_body, m_kind == FunctionKind::Generator);
             auto& passes = JS::Bytecode::Interpreter::optimization_pipeline();
@@ -211,7 +392,7 @@ Value OrdinaryFunctionObject::execute_function_body()
     } else {
         VERIFY(m_kind != FunctionKind::Generator);
         OwnPtr<Interpreter> local_interpreter;
-        ast_interpreter = vm.interpreter_if_exists();
+        Interpreter* ast_interpreter = vm.interpreter_if_exists();
 
         if (!ast_interpreter) {
             local_interpreter = Interpreter::create_with_existing_realm(*realm());
@@ -220,9 +401,7 @@ Value OrdinaryFunctionObject::execute_function_body()
 
         VM::InterpreterExecutionScope scope(*ast_interpreter);
 
-        prepare_arguments();
-        if (vm.exception())
-            return {};
+        TRY_OR_DISCARD(function_declaration_instantiation(ast_interpreter));
 
         return ast_interpreter->execute_statement(global_object(), m_body, ScopeType::Function);
     }

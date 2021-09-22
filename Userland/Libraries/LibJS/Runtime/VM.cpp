@@ -573,9 +573,11 @@ Value VM::construct(FunctionObject& function, FunctionObject& new_target, Option
     if (result.is_object())
         return result;
 
-    if (auto* environment = callee_context.lexical_environment)
-        return environment->get_this_binding(global_object);
-    return this_argument;
+    if (function.constructor_kind() == FunctionObject::ConstructorKind::Base)
+        return this_argument;
+
+    VERIFY(callee_context.lexical_environment);
+    return callee_context.lexical_environment->get_this_binding(global_object);
 }
 
 void VM::throw_exception(Exception& exception)
