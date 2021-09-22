@@ -2837,4 +2837,29 @@ bool ImportStatement::has_bound_name(StringView name) const
     });
 }
 
+// 14.2.3 BlockDeclarationInstantiation ( code, env ), https://tc39.es/ecma262/#sec-blockdeclarationinstantiation
+void BlockStatement::block_declaration_instantiation(GlobalObject& global_object, Environment* environment) const
+{
+    VERIFY(environment);
+    for (auto& variable : variables()) {
+        if (variable.declaration_kind() == DeclarationKind::Var)
+            continue;
+        variable.for_each_bound_name([&](auto const& name) {
+            if (variable.declaration_kind() == DeclarationKind::Const)
+                environment->create_immutable_binding(global_object, name, true);
+            else
+                environment->create_immutable_binding(global_object, name, false);
+            // FIXME: Last step is replaced in AnnexB section 3.2.6
+
+            return IterationDecision::Continue;
+        });
+    }
+    for (auto& declaration : functions()) {
+        environment->create_immutable_binding(global_object, declaration.name(), false);
+        auto* function = OrdinaryFunctionObject::create(global_object, declaration.name(), declaration.body(), declaration.parameters(), declaration.function_length(), environment, declaration.kind(), declaration.is_strict_mode());
+        environment->initialize_binding(global_object, declaration.name(), function);
+        // FIXME: Last step is replaced in AnnexB section 3.2.6
+    }
+}
+
 }

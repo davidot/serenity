@@ -39,12 +39,6 @@ enum class ScopeType {
     Continuable,
 };
 
-struct ScopeFrame {
-    ScopeType type;
-    NonnullRefPtr<ScopeNode> scope_node;
-    bool pushed_environment { false };
-};
-
 class VM : public RefCounted<VM> {
 public:
     struct CustomData {

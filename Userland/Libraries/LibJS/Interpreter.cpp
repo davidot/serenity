@@ -8,6 +8,7 @@
 #include <AK/ScopeGuard.h>
 #include <LibJS/AST.h>
 #include <LibJS/Interpreter.h>
+#include <LibJS/Runtime/AbstractOperations.h>
 #include <LibJS/Runtime/FunctionEnvironment.h>
 #include <LibJS/Runtime/GlobalEnvironment.h>
 #include <LibJS/Runtime/GlobalObject.h>
@@ -93,96 +94,31 @@ const Realm& Interpreter::realm() const
     return static_cast<const Realm&>(*m_realm.cell());
 }
 
-void Interpreter::enter_scope(const ScopeNode& scope_node, ScopeType scope_type, GlobalObject& global_object)
-{
-
-    if (scope_type == ScopeType::Function) {
-        push_scope({ scope_type, scope_node, false });
-        return;
-    }
-
-    HashMap<FlyString, Variable> scope_variables_with_declaration_kind;
-    scope_variables_with_declaration_kind.ensure_capacity(16);
-
-    bool is_program_node = is<Program>(scope_node);
-
-    for (auto& declaration : scope_node.variables()) {
-        for (auto& declarator : declaration.declarations()) {
-            if (is_program_node && declaration.declaration_kind() == DeclarationKind::Var) {
-                declarator.target().visit(
-                    [&](const NonnullRefPtr<Identifier>& id) {
-                        global_object.define_direct_property(id->string(), js_undefined(), JS::Attribute::Writable | JS::Attribute::Enumerable);
-                    },
-                    [&](const NonnullRefPtr<BindingPattern>& binding) {
-                        binding->for_each_bound_name([&](const auto& name) {
-                            global_object.define_direct_property(name, js_undefined(), JS::Attribute::Writable | JS::Attribute::Enumerable);
-                        });
-                    });
-                if (exception())
-                    return;
-            } else {
-                declarator.target().visit(
-                    [&](const NonnullRefPtr<Identifier>& id) {
-                        scope_variables_with_declaration_kind.set(id->string(), { js_undefined(), declaration.declaration_kind() });
-                    },
-                    [&](const NonnullRefPtr<BindingPattern>& binding) {
-                        binding->for_each_bound_name([&](const auto& name) {
-                            scope_variables_with_declaration_kind.set(name, { js_undefined(), declaration.declaration_kind() });
-                        });
-                    });
-            }
-        }
-    }
-
-    bool pushed_environment = false;
-
-    if (!scope_variables_with_declaration_kind.is_empty()) {
-        auto* environment = heap().allocate<DeclarativeEnvironment>(global_object, move(scope_variables_with_declaration_kind), lexical_environment());
-        vm().running_execution_context().lexical_environment = environment;
-        vm().running_execution_context().variable_environment = environment;
-        pushed_environment = true;
-    }
-
-    push_scope({ scope_type, scope_node, pushed_environment });
-}
-
-void Interpreter::exit_scope(const ScopeNode& scope_node)
-{
-    while (!m_scope_stack.is_empty()) {
-        auto popped_scope = m_scope_stack.take_last();
-        if (popped_scope.pushed_environment) {
-            vm().running_execution_context().lexical_environment = vm().running_execution_context().lexical_environment->outer_environment();
-            vm().running_execution_context().variable_environment = vm().running_execution_context().variable_environment->outer_environment();
-        }
-        if (popped_scope.scope_node.ptr() == &scope_node)
-            break;
-    }
-
-    // If we unwind all the way, just reset m_unwind_until so that future "return" doesn't break.
-    if (m_scope_stack.is_empty())
-        vm().stop_unwind();
-}
-
-void Interpreter::push_scope(ScopeFrame frame)
-{
-    m_scope_stack.append(move(frame));
-}
-
 Value Interpreter::execute_statement(GlobalObject& global_object, const Statement& statement, ScopeType scope_type)
 {
     if (!is<ScopeNode>(statement))
         return statement.execute(*this, global_object);
 
     auto& block = static_cast<const ScopeNode&>(statement);
+    auto is_block = is<BlockStatement>(block);
     Vector<FlyString> const& labels = [&] {
-        if (is<BlockStatement>(block)) {
+        if (is_block)
             return static_cast<BlockStatement const&>(block).labels();
-        } else {
+        else
             return Vector<FlyString>();
-        }
     }();
 
-    enter_scope(block, scope_type, global_object);
+    Environment* old_environment = vm().running_execution_context().lexical_environment;
+    ScopeGuard restore_environment = [&] {
+        vm().running_execution_context().lexical_environment = old_environment;
+    };
+
+    if (is_block && scope_type != ScopeType::Function) {
+        // Function, Eval and Script/Module should have already done the necessary steps
+        auto* block_environment = new_declarative_environment(*old_environment);
+        static_cast<BlockStatement const&>(block).block_declaration_instantiation(global_object, block_environment);
+        vm().running_execution_context().lexical_environment = block_environment;
+    }
 
     Value last_value;
     for (auto& node : block.children()) {
@@ -204,8 +140,6 @@ Value Interpreter::execute_statement(GlobalObject& global_object, const Statemen
 
     if (vm().unwind_until() == scope_type)
         vm().stop_unwind();
-
-    exit_scope(block);
 
     return last_value;
 }

@@ -69,9 +69,6 @@ public:
 
     FunctionEnvironment* current_function_environment();
 
-    void enter_scope(const ScopeNode&, ScopeType, GlobalObject&);
-    void exit_scope(const ScopeNode&);
-
     void push_ast_node(ExecutingASTNodeChain& chain_node)
     {
         chain_node.previous = m_ast_node_chain;
@@ -93,9 +90,6 @@ public:
 private:
     explicit Interpreter(VM&);
 
-    void push_scope(ScopeFrame frame);
-
-    Vector<ScopeFrame> m_scope_stack;
     ExecutingASTNodeChain* m_ast_node_chain { nullptr };
 
     NonnullRefPtr<VM> m_vm;
