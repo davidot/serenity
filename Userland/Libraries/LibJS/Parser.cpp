@@ -2856,6 +2856,7 @@ NonnullRefPtr<Statement> Parser::parse_for_statement()
 
 NonnullRefPtr<Statement> Parser::parse_for_in_of_statement(NonnullRefPtr<ASTNode> lhs)
 {
+    Variant<NonnullRefPtr<ASTNode>, NonnullRefPtr<BindingPattern>> for_declaration = lhs;
     auto rule_start = push_start();
     if (is<VariableDeclaration>(*lhs)) {
         auto declarations = static_cast<VariableDeclaration&>(*lhs).declarations();
@@ -2870,14 +2871,7 @@ NonnullRefPtr<Statement> Parser::parse_for_in_of_statement(NonnullRefPtr<ASTNode
         if (is<ObjectExpression>(*lhs) || is<ArrayExpression>(*lhs)) {
             auto synthesized_binding_pattern = synthesize_binding_pattern(static_cast<Expression const&>(*lhs));
             if (synthesized_binding_pattern) {
-                NonnullRefPtrVector<VariableDeclarator> declarations;
-                Variant<NonnullRefPtr<Identifier>, NonnullRefPtr<BindingPattern>> target = synthesized_binding_pattern.release_nonnull();
-                declarations.append(create_ast_node<VariableDeclarator>(
-                    { m_state.current_token.filename(), lhs->source_range().start, lhs->source_range().end },
-                    move(target),
-                    RefPtr<Expression> {}));
-                lhs = create_ast_node<VariableDeclaration>({ m_state.current_token.filename(), lhs->source_range().start, lhs->source_range().end }, DeclarationKind::Var, move(declarations));
-
+                for_declaration = synthesized_binding_pattern.release_nonnull();
                 valid = true;
             }
         }
@@ -2901,8 +2895,8 @@ NonnullRefPtr<Statement> Parser::parse_for_in_of_statement(NonnullRefPtr<ASTNode
     TemporaryChange continue_change(m_state.in_continue_context, true);
     auto body = parse_statement();
     if (in_or_of.type() == TokenType::In)
-        return create_ast_node<ForInStatement>({ m_state.current_token.filename(), rule_start.position(), position() }, move(lhs), move(rhs), move(body));
-    return create_ast_node<ForOfStatement>({ m_state.current_token.filename(), rule_start.position(), position() }, move(lhs), move(rhs), move(body));
+        return create_ast_node<ForInStatement>({ m_state.current_token.filename(), rule_start.position(), position() }, move(for_declaration), move(rhs), move(body));
+    return create_ast_node<ForOfStatement>({ m_state.current_token.filename(), rule_start.position(), position() }, move(for_declaration), move(rhs), move(body));
 }
 
 NonnullRefPtr<DebuggerStatement> Parser::parse_debugger_statement()

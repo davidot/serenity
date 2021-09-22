@@ -616,7 +616,7 @@ private:
 
 class ForInStatement final : public IterationStatement {
 public:
-    ForInStatement(SourceRange source_range, NonnullRefPtr<ASTNode> lhs, NonnullRefPtr<Expression> rhs, NonnullRefPtr<Statement> body)
+    ForInStatement(SourceRange source_range, Variant<NonnullRefPtr<ASTNode>, NonnullRefPtr<BindingPattern>> lhs, NonnullRefPtr<Expression> rhs, NonnullRefPtr<Statement> body)
         : IterationStatement(source_range)
         , m_lhs(move(lhs))
         , m_rhs(move(rhs))
@@ -624,7 +624,7 @@ public:
     {
     }
 
-    ASTNode const& lhs() const { return *m_lhs; }
+    auto const& lhs() const { return m_lhs; }
     Expression const& rhs() const { return *m_rhs; }
     Statement const& body() const { return *m_body; }
 
@@ -632,14 +632,14 @@ public:
     virtual void dump(int indent) const override;
 
 private:
-    NonnullRefPtr<ASTNode> m_lhs;
+    Variant<NonnullRefPtr<ASTNode>, NonnullRefPtr<BindingPattern>> m_lhs;
     NonnullRefPtr<Expression> m_rhs;
     NonnullRefPtr<Statement> m_body;
 };
 
 class ForOfStatement final : public IterationStatement {
 public:
-    ForOfStatement(SourceRange source_range, NonnullRefPtr<ASTNode> lhs, NonnullRefPtr<Expression> rhs, NonnullRefPtr<Statement> body)
+    ForOfStatement(SourceRange source_range, Variant<NonnullRefPtr<ASTNode>, NonnullRefPtr<BindingPattern>> lhs, NonnullRefPtr<Expression> rhs, NonnullRefPtr<Statement> body)
         : IterationStatement(source_range)
         , m_lhs(move(lhs))
         , m_rhs(move(rhs))
@@ -647,7 +647,7 @@ public:
     {
     }
 
-    ASTNode const& lhs() const { return *m_lhs; }
+    auto const& lhs() const { return m_lhs; }
     Expression const& rhs() const { return *m_rhs; }
     Statement const& body() const { return *m_body; }
 
@@ -655,7 +655,7 @@ public:
     virtual void dump(int indent) const override;
 
 private:
-    NonnullRefPtr<ASTNode> m_lhs;
+    Variant<NonnullRefPtr<ASTNode>, NonnullRefPtr<BindingPattern>> m_lhs;
     NonnullRefPtr<Expression> m_rhs;
     NonnullRefPtr<Statement> m_body;
 };

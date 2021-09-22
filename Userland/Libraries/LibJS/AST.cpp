@@ -518,46 +518,144 @@ Value ForStatement::execute(Interpreter& interpreter, GlobalObject& global_objec
     return last_value;
 }
 
-static Variant<NonnullRefPtr<Identifier>, NonnullRefPtr<BindingPattern>, Reference> variable_from_for_declaration(Interpreter& interpreter, GlobalObject& global_object, ASTNode const& node, RefPtr<BlockStatement> wrapper)
-{
-    if (is<VariableDeclaration>(node)) {
-        auto& variable_declaration = static_cast<VariableDeclaration const&>(node);
-        VERIFY(!variable_declaration.declarations().is_empty());
-        if (variable_declaration.declaration_kind() != DeclarationKind::Var) {
-            wrapper = create_ast_node<BlockStatement>(node.source_range());
-            interpreter.enter_scope(*wrapper, ScopeType::Block, global_object);
+struct ForInOfHeadState {
+    explicit ForInOfHeadState(Variant<NonnullRefPtr<ASTNode>, NonnullRefPtr<BindingPattern>> lhs)
+    {
+        lhs.visit(
+            [&](NonnullRefPtr<ASTNode>& ast_node) {
+                expression_lhs = ast_node.ptr();
+            },
+            [&](NonnullRefPtr<BindingPattern>& pattern) {
+                pattern_lhs = pattern.ptr();
+                destructuring = true;
+                lhs_kind = Assignment;
+            });
+    }
+
+    ASTNode* expression_lhs = nullptr;
+    BindingPattern* pattern_lhs = nullptr;
+    enum LhsKind {
+        Assignment,
+        VarBinding,
+        LexicalBinding
+    } lhs_kind
+        = Assignment;
+    bool destructuring = false;
+
+    Value rhs_value;
+
+    // 14.7.5.7 ForIn/OfBodyEvaluation ( lhs, stmt, iteratorRecord, iterationKind, lhsKind, labelSet [ , iteratorKind ] ), https://tc39.es/ecma262/#sec-runtime-semantics-forin-div-ofbodyevaluation-lhs-stmt-iterator-lhskind-labelset
+    Completion execute_head(Interpreter& interpreter, GlobalObject& global_object, Value next_value) const
+    {
+        // Steps 6.g through 6.k
+        VERIFY(!next_value.is_empty());
+
+        Optional<Reference> lhs_reference;
+        Environment* iteration_environment = nullptr;
+
+        if (lhs_kind == Assignment || lhs_kind == VarBinding) {
+            if (!destructuring) {
+                VERIFY(expression_lhs);
+                if (is<VariableDeclaration>(*expression_lhs)) {
+                    auto& declaration = static_cast<VariableDeclaration const&>(*expression_lhs);
+                    VERIFY(declaration.declarations().first().target().has<NonnullRefPtr<Identifier>>());
+                    lhs_reference = declaration.declarations().first().target().get<NonnullRefPtr<Identifier>>()->to_reference(interpreter, global_object);
+                } else {
+                    VERIFY(is<Identifier>(*expression_lhs) || is<MemberExpression>(*expression_lhs));
+                    auto& expression = static_cast<Expression const&>(*expression_lhs);
+                    lhs_reference = expression.to_reference(interpreter, global_object);
+                }
+            }
+        } else {
+            VERIFY(expression_lhs && is<VariableDeclaration>(*expression_lhs));
+            iteration_environment = new_declarative_environment(*interpreter.lexical_environment());
+            auto& for_declaration = static_cast<VariableDeclaration const&>(*expression_lhs);
+            for_declaration.for_each_bound_name([&](auto const& name) {
+                if (for_declaration.declaration_kind() == DeclarationKind::Const)
+                    iteration_environment->create_immutable_binding(global_object, name, false);
+                else
+                    iteration_environment->create_mutable_binding(global_object, name, true);
+            });
+            interpreter.vm().running_execution_context().lexical_environment = iteration_environment;
+
+            if (!destructuring) {
+                VERIFY(for_declaration.declarations().first().target().has<NonnullRefPtr<Identifier>>());
+                lhs_reference = interpreter.vm().resolve_binding(for_declaration.declarations().first().target().get<NonnullRefPtr<Identifier>>()->string());
+            }
         }
-        variable_declaration.execute(interpreter, global_object);
-        return variable_declaration.declarations().first().target().downcast<NonnullRefPtr<Identifier>, NonnullRefPtr<BindingPattern>, Reference>();
+
+        if (auto* exception = interpreter.exception())
+            return throw_completion(exception->value());
+
+        if (!destructuring) {
+            VERIFY(lhs_reference.has_value());
+            if (lhs_kind == LexicalBinding)
+                lhs_reference->initialize_referenced_binding(global_object, next_value);
+            else
+                lhs_reference->put_value(global_object, next_value);
+            if (auto* exception = interpreter.exception())
+                return throw_completion(exception->value());
+            return normal_completion({});
+        }
+        if (lhs_kind == Assignment) {
+            VERIFY(pattern_lhs);
+            return interpreter.vm().destructuring_assignment_evaluation(*pattern_lhs, next_value, global_object);
+        }
+        VERIFY(expression_lhs && is<VariableDeclaration>(*expression_lhs));
+        auto& for_declaration = static_cast<VariableDeclaration const&>(*expression_lhs);
+        auto& binding_pattern = for_declaration.declarations().first().target().get<NonnullRefPtr<BindingPattern>>();
+        VERIFY(lhs_kind == VarBinding || iteration_environment);
+        return interpreter.vm().binding_initialization(binding_pattern, next_value, iteration_environment, global_object);
+    }
+};
+
+// 14.7.5.6 ForIn/OfHeadEvaluation ( uninitializedBoundNames, expr, iterationKind ), https://tc39.es/ecma262/#sec-runtime-semantics-forinofheadevaluation
+static ForInOfHeadState for_in_of_head_execute(Interpreter& interpreter, GlobalObject& global_object, Variant<NonnullRefPtr<ASTNode>, NonnullRefPtr<BindingPattern>> lhs, Expression const& rhs)
+{
+
+    ForInOfHeadState state(lhs);
+    if (auto* ast_ptr = lhs.get_pointer<NonnullRefPtr<ASTNode>>(); ast_ptr && is<VariableDeclaration>(*(*ast_ptr))) {
+        Environment* new_environment = nullptr;
+
+        auto& variable_declaration = static_cast<VariableDeclaration const&>(*(*ast_ptr));
+        VERIFY(variable_declaration.declarations().size() == 1);
+        state.destructuring = variable_declaration.declarations().first().target().has<NonnullRefPtr<BindingPattern>>();
+        if (variable_declaration.declaration_kind() == DeclarationKind::Var) {
+            state.lhs_kind = ForInOfHeadState::VarBinding;
+        } else {
+            state.lhs_kind = ForInOfHeadState::LexicalBinding;
+            new_environment = new_declarative_environment(*interpreter.lexical_environment());
+            variable_declaration.for_each_bound_name([&](auto const& name) {
+                new_environment->create_mutable_binding(global_object, name, false);
+            });
+        }
+        if (new_environment) {
+            TemporaryChange<Environment*> scope_change(interpreter.vm().running_execution_context().lexical_environment, new_environment);
+            state.rhs_value = rhs.execute(interpreter, global_object);
+        } else {
+            state.rhs_value = rhs.execute(interpreter, global_object);
+        }
+        return state;
     }
 
-    if (is<Identifier>(node)) {
-        return NonnullRefPtr(static_cast<Identifier const&>(node));
-    }
-
-    if (is<MemberExpression>(node)) {
-        return static_cast<MemberExpression const&>(node).to_reference(interpreter, global_object);
-    }
-
-    VERIFY_NOT_REACHED();
+    // Could be identifier, MemberExpression or BindingPattern which are all Assignment (the default).
+    state.rhs_value = rhs.execute(interpreter, global_object);
+    return state;
 }
 
 Value ForInStatement::execute(Interpreter& interpreter, GlobalObject& global_object) const
 {
     InterpreterNodeScope node_scope { interpreter, *this };
 
-    bool has_declaration = is<VariableDeclaration>(*m_lhs);
-    if (!has_declaration && !is<Identifier>(*m_lhs) && !is<MemberExpression>(*m_lhs)) {
-        VERIFY_NOT_REACHED();
-    }
-    RefPtr<BlockStatement> wrapper;
-    auto target = variable_from_for_declaration(interpreter, global_object, m_lhs, wrapper);
-    auto wrapper_cleanup = ScopeGuard([&] {
-        if (wrapper)
-            interpreter.exit_scope(*wrapper);
+    Environment* old_environment = interpreter.lexical_environment();
+    auto restore_scope = ScopeGuard([&] {
+        interpreter.vm().running_execution_context().lexical_environment = old_environment;
     });
+
     auto last_value = js_undefined();
-    auto rhs_result = m_rhs->execute(interpreter, global_object);
+    auto for_in_head_state = for_in_of_head_execute(interpreter, global_object, m_lhs, *m_rhs);
+
+    auto rhs_result = for_in_head_state.rhs_value;
     if (interpreter.exception())
         return {};
     if (rhs_result.is_nullish())
@@ -566,13 +664,9 @@ Value ForInStatement::execute(Interpreter& interpreter, GlobalObject& global_obj
     while (object) {
         auto property_names = object->enumerable_own_property_names(Object::PropertyKind::Key);
         for (auto& value : property_names) {
-            if (auto reference_ptr = target.get_pointer<Reference>())
-                reference_ptr->put_value(global_object, value);
-            else
-                TRY_OR_DISCARD(interpreter.vm().binding_initialization(target.get<NonnullRefPtr<BindingPattern>>(), value, nullptr, global_object));
-            if (interpreter.exception())
-                return {};
+            TRY_OR_DISCARD(for_in_head_state.execute_head(interpreter, global_object, value));
             last_value = interpreter.execute_statement(global_object, *m_body).value_or(last_value);
+            interpreter.vm().running_execution_context().lexical_environment = old_environment;
             if (interpreter.exception())
                 return {};
             if (interpreter.vm().should_unwind()) {
@@ -597,31 +691,24 @@ Value ForOfStatement::execute(Interpreter& interpreter, GlobalObject& global_obj
 {
     InterpreterNodeScope node_scope { interpreter, *this };
 
-    bool has_declaration = is<VariableDeclaration>(*m_lhs);
-    if (!has_declaration && !is<Identifier>(*m_lhs) && !is<MemberExpression>(*m_lhs)) {
-        VERIFY_NOT_REACHED();
-    }
-    RefPtr<BlockStatement> wrapper;
-    auto target = variable_from_for_declaration(interpreter, global_object, m_lhs, wrapper);
-    auto wrapper_cleanup = ScopeGuard([&] {
-        if (wrapper)
-            interpreter.exit_scope(*wrapper);
+    Environment* old_environment = interpreter.lexical_environment();
+    auto restore_scope = ScopeGuard([&] {
+        interpreter.vm().running_execution_context().lexical_environment = old_environment;
     });
+
+    auto for_of_head_state = for_in_of_head_execute(interpreter, global_object, m_lhs, m_rhs);
+
+    auto rhs_result = for_of_head_state.rhs_value;
     auto last_value = js_undefined();
-    auto rhs_result = m_rhs->execute(interpreter, global_object);
     if (interpreter.exception())
         return {};
 
     get_iterator_values(global_object, rhs_result, [&](Value value) {
-        if (auto reference_ptr = target.get_pointer<Reference>()) {
-            reference_ptr->put_value(global_object, value);
-        } else {
-            auto result = interpreter.vm().binding_initialization(target.get<NonnullRefPtr<BindingPattern>>(), value, nullptr, global_object);
-            if (result.is_error())
-                return IterationDecision::Break;
-        }
-
+        auto result = for_of_head_state.execute_head(interpreter, global_object, value);
+        if (result.is_error())
+            return IterationDecision::Break;
         last_value = interpreter.execute_statement(global_object, *m_body).value_or(last_value);
+        interpreter.vm().running_execution_context().lexical_environment = old_environment;
         if (interpreter.exception())
             return IterationDecision::Break;
         if (interpreter.vm().should_unwind()) {
@@ -1494,7 +1581,7 @@ void ForInStatement::dump(int indent) const
 
     print_indent(indent);
     outln("ForIn");
-    lhs().dump(indent + 1);
+    lhs().visit([&](auto& lhs) { lhs->dump(indent + 1); });
     rhs().dump(indent + 1);
     body().dump(indent + 1);
 }
@@ -1505,7 +1592,7 @@ void ForOfStatement::dump(int indent) const
 
     print_indent(indent);
     outln("ForOf");
-    lhs().dump(indent + 1);
+    lhs().visit([&](auto& lhs) { lhs->dump(indent + 1); });
     rhs().dump(indent + 1);
     body().dump(indent + 1);
 }
