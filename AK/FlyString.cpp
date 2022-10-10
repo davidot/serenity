@@ -95,6 +95,17 @@ template Optional<u16> FlyString::to_uint(TrimWhitespace) const;
 template Optional<u32> FlyString::to_uint(TrimWhitespace) const;
 template Optional<u64> FlyString::to_uint(TrimWhitespace) const;
 
+#ifndef KERNEL
+template<typename T>
+Optional<T> FlyString::to_double(TrimWhitespace trim_whitespace) const
+{
+    return StringUtils::convert_to_double<T>(view(), trim_whitespace);
+}
+
+template Optional<double> FlyString::to_double(AK::TrimWhitespace) const;
+template Optional<float> FlyString::to_double(AK::TrimWhitespace) const;
+#endif
+
 bool FlyString::equals_ignoring_case(StringView other) const
 {
     return StringUtils::equals_ignoring_case(view(), other);

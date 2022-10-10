@@ -236,6 +236,15 @@ template Optional<long> StringView::to_uint() const;
 template Optional<long long> StringView::to_uint() const;
 
 #ifndef KERNEL
+template<typename T>
+Optional<T> StringView::to_double(TrimWhitespace trim_whitespace) const
+{
+    return StringUtils::convert_to_double<T>(*this, trim_whitespace);
+}
+
+template Optional<double> StringView::to_double(TrimWhitespace) const;
+template Optional<float> StringView::to_double(TrimWhitespace) const;
+
 bool StringView::operator==(String const& string) const
 {
     return *this == string.view();

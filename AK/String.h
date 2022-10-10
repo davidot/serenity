@@ -116,6 +116,10 @@ public:
     [[nodiscard]] Optional<T> to_int(TrimWhitespace = TrimWhitespace::Yes) const;
     template<typename T = unsigned>
     [[nodiscard]] Optional<T> to_uint(TrimWhitespace = TrimWhitespace::Yes) const;
+#ifndef KERNEL
+    template<typename T = double>
+    [[nodiscard]] Optional<T> to_double(TrimWhitespace = TrimWhitespace::Yes) const;
+#endif
 
     [[nodiscard]] String to_lowercase() const;
     [[nodiscard]] String to_uppercase() const;
