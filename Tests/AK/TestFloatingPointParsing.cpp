@@ -10,41 +10,7 @@
 #include <AK/JsonParser.h>
 #include <stdlib.h>
 
-[[maybe_unused]] static double strtod_wrapper(StringView view)
-{
-    VERIFY(!view.is_empty());
-    char* end = const_cast<char*>(view.characters_without_null_termination() + view.length());
-    return strtod(view.characters_without_null_termination(), &end);
-}
-
-[[maybe_unused]] static float strtof_wrapper(StringView view)
-{
-    VERIFY(!view.is_empty());
-    char* end = const_cast<char*>(view.characters_without_null_termination() + view.length());
-    return strtof(view.characters_without_null_termination(), &end);
-}
-
-[[maybe_unused]] static double json_parse_wrapper(StringView view)
-{
-    VERIFY(!view.is_empty());
-    JsonParser parser { view };
-    auto error_or_result = parser.parse();
-    if (error_or_result.is_error() || !error_or_result.value().is_double())
-        return __builtin_nan("");
-    return strtod_wrapper(view);
-}
-
-[[maybe_unused]] static double new_parser(StringView view)
-{
-    return parse_floating_point_completely<double>(view).release_value();
-}
-
-[[maybe_unused]] static float new_parserf(StringView view)
-{
-    return parse_floating_point_completely<float>(view).release_value();
-}
-
-[[maybe_unused]] static double newhex(StringView view)
+static double newhex(StringView view)
 {
     char const* end = view.characters_without_null_termination() + view.length();
     auto value = parse_first_hexfloat<double>(view.characters_without_null_termination(), end);
@@ -52,17 +18,13 @@
     return value.value;
 }
 
-[[maybe_unused]] static float newhexf(StringView view)
+static float newhexf(StringView view)
 {
     char const* end = view.characters_without_null_termination() + view.length();
     auto value = parse_first_hexfloat<float>(view.characters_without_null_termination(), end);
     VERIFY(value.error == AK::FloatingPointError::None);
     return value.value;
 }
-
-// #define double_parse_function strtod_wrapper
-#define double_parse_function new_parser
-#define float_parse_function new_parserf
 
 TEST_CASE(hexfloat)
 {
@@ -108,6 +70,56 @@ TEST_CASE(hexfloat)
     does_parse_hex_float_and_double_like_cpp(0x180eafb89ba47c9.001p+52);
     does_parse_hex_float_and_double_like_cpp(0x180eafb89ba47c9.001p-4);
 
+    does_parse_hex_double_like_cpp(0x1.80eafb89ba47cp-1075);
+    does_parse_hex_double_like_cpp(0x1.80eafb89ba47c1p-1075);
+    does_parse_hex_double_like_cpp(0x1.80eafb89ba47cp-1040);
+    does_parse_hex_double_like_cpp(0x1.80eafb89ba47c1p-1040);
+    does_parse_hex_double_like_cpp(0x1.80eafb89ba47cp-999);
+    does_parse_hex_double_like_cpp(0x1.80eafb89ba47c1p-999);
+    does_parse_hex_double_like_cpp(0x1.80eafb89ba47cp-788);
+    does_parse_hex_double_like_cpp(0x1.80eafb89ba47c1p-788);
+    does_parse_hex_double_like_cpp(0x1.80eafb89ba47cp-632);
+    does_parse_hex_double_like_cpp(0x1.80eafb89ba47c1p-632);
+    does_parse_hex_double_like_cpp(0x1.80eafb89ba47cp-408);
+    does_parse_hex_double_like_cpp(0x1.80eafb89ba47c1p-408);
+    does_parse_hex_double_like_cpp(0x1.80eafb89ba47cp-189);
+    does_parse_hex_double_like_cpp(0x1.80eafb89ba47c1p-189);
+    does_parse_hex_float_and_double_like_cpp(0x1.80eafb89ba47cp-76);
+    does_parse_hex_float_and_double_like_cpp(0x1.80eafb89ba47c1p-76);
+    does_parse_hex_float_and_double_like_cpp(0x1.80eafb89ba47cp-52);
+    does_parse_hex_float_and_double_like_cpp(0x1.80eafb89ba47c1p-52);
+    does_parse_hex_float_and_double_like_cpp(0x1.80eafb89ba47cp-25);
+    does_parse_hex_float_and_double_like_cpp(0x1.80eafb89ba47c1p-25);
+    does_parse_hex_float_and_double_like_cpp(0x1.80eafb89ba47cp-13);
+    does_parse_hex_float_and_double_like_cpp(0x1.80eafb89ba47c1p-13);
+    does_parse_hex_float_and_double_like_cpp(0x1.80eafb89ba47cp-3);
+    does_parse_hex_float_and_double_like_cpp(0x1.80eafb89ba47c1p-3);
+
+    does_parse_hex_float_and_double_like_cpp(0x1.80eafb89ba47cp+3);
+    does_parse_hex_float_and_double_like_cpp(0x1.80eafb89ba47c1p+3);
+    does_parse_hex_float_and_double_like_cpp(0x1.80eafb89ba47cp+6);
+    does_parse_hex_float_and_double_like_cpp(0x1.80eafb89ba47c1p+6);
+    does_parse_hex_float_and_double_like_cpp(0x1.80eafb89ba47cp+13);
+    does_parse_hex_float_and_double_like_cpp(0x1.80eafb89ba47c1p+13);
+    does_parse_hex_float_and_double_like_cpp(0x1.80eafb89ba47cp+19);
+    does_parse_hex_float_and_double_like_cpp(0x1.80eafb89ba47c1p+19);
+    does_parse_hex_double_like_cpp(0x1.80eafb89ba47cp+154);
+    does_parse_hex_double_like_cpp(0x1.80eafb89ba47c1p+154);
+    does_parse_hex_double_like_cpp(0x1.80eafb89ba47cp+298);
+    does_parse_hex_double_like_cpp(0x1.80eafb89ba47c1p+298);
+    does_parse_hex_double_like_cpp(0x1.80eafb89ba47cp+455);
+    does_parse_hex_double_like_cpp(0x1.80eafb89ba47c1p+455);
+    does_parse_hex_double_like_cpp(0x1.80eafb89ba47cp+692);
+    does_parse_hex_double_like_cpp(0x1.80eafb89ba47c1p+692);
+    does_parse_hex_double_like_cpp(0x1.80eafb89ba47cp+901);
+    does_parse_hex_double_like_cpp(0x1.80eafb89ba47c1p+901);
+    does_parse_hex_double_like_cpp(0x1.80eafb89ba47cp+1023);
+    does_parse_hex_double_like_cpp(0x1.80eafb89ba47c1p+1023);
+    does_parse_hex_double_like_cpp(0x.80eafb89ba47cp+1024);
+    does_parse_hex_double_like_cpp(0x.80eafb89ba47c1p+1024);
+    does_parse_hex_double_like_cpp(0x.080eafb89ba47cp+1025);
+    does_parse_hex_double_like_cpp(0x.080eafb89ba47c1p+1025);
+
     does_parse_hex_double_like_cpp(0x1.c5e1463479f8ep+218);
     does_parse_hex_double_like_cpp(0x1.c5e1463479f8e8p+218);
     does_parse_hex_double_like_cpp(0x1.c5e1463479f8e80p+218);
@@ -145,10 +157,6 @@ TEST_CASE(hexfloat)
     does_parse_hex_float_and_double_like_cpp(0x11.p2);
     does_parse_hex_float_and_double_like_cpp(0x11.p-2);
     does_parse_hex_float_and_double_like_cpp(0x11.p-0);
-
-    //    dbgln("{:016x}", bit_cast<u64>(strtod("-0x1.p0", nullptr)));
-    //    outln("{:016x}", bit_cast<u64>(strtod("-0x1.p0", nullptr)));
-    outln("{:016x}", bit_cast<u64>(strtod("-0x1p-10000", nullptr)));
 }
 
 TEST_CASE(invalid_hex_floats)
@@ -172,7 +180,22 @@ TEST_CASE(invalid_hex_floats)
     EXPECT_HEX_PARSE_TO_VALUE_AND_CONSUME_CHARS("0xCAPE", 0xCAp0, 4);
 }
 
-TEST_CASE(simply_cases)
+static double new_parser(StringView view)
+{
+    char const* start = view.characters_without_null_termination();
+    return parse_floating_point_completely<double>(start, start + view.length()).release_value();
+}
+
+static float new_parserf(StringView view)
+{
+    char const* start = view.characters_without_null_termination();
+    return parse_floating_point_completely<float>(start, start + view.length()).release_value();
+}
+
+#define double_parse_function new_parser
+#define float_parse_function new_parserf
+
+TEST_CASE(simple_cases)
 {
 
 #define does_parse_double_like_cpp(value)                                              \
@@ -191,9 +214,6 @@ TEST_CASE(simply_cases)
 #define does_parse_float_and_double_like_cpp(value) \
     does_parse_double_like_cpp(value);              \
     does_parse_float_like_cpp(value);
-
-    does_parse_double_like_cpp(2.4703282292062327208828439643411068618252990130716238221279284125033775363510437593264991818081799618989828234772285886546332835517796989819938739800539093906315035659515570226392290858392449105184435931802849936536152500319370457678249219365623669863658480757001585769269903706311928279558551332927834338409351978015531246597263579574622766465272827220056374006485499977096599470454020828166226237857393450736339007967761930577506740176324673600968951340535537458516661134223766678604162159680461914467291840300530057530849048765391711386591646239524912623653881879636239373280423891018672348497668235089863388587925628302755995657524455507255189313690836254779186948667994968324049705821028513185451396213837722826145437693412532098591327667236328125001e-324);
-    return;
 
     does_parse_double_like_cpp(2.22507385850720138309e-308);
 
@@ -319,17 +339,20 @@ TEST_CASE(simply_cases)
     does_parse_double_like_cpp(0.5228498395936205074295394307286877840745777433986221937532613872508781594512713774248897872701267900937355341040794330502046537234627217353184072348140164415641909271474048258861995623182036767347953342268740983499399650083036318996344797035062154164551204996820412300010174963641101352685223346561236927986431514284038124115288530689401919280970935077214657241686229994045115862318045415323218821842922297191448142071618101950151752445844415136251927e-323);
 
     // actual interesting (non 19+ digit) failures from current strtod'
-    does_parse_float_and_double_like_cpp(89255e-22);
     does_parse_double_like_cpp(1e126);
     does_parse_double_like_cpp(1e210);
     does_parse_float_and_double_like_cpp(358416272e-33);
 
+    // FIXME: These are different in 32 bit, since that will be removed some time (soon?)
+    //        we can remove this guard at that point.
+#if not defined(__serenity__) || not ARCH(I386)
     does_parse_float_and_double_like_cpp(89255e-22);
     does_parse_float_and_double_like_cpp(8925.5e-21);
     does_parse_float_and_double_like_cpp(8.9255e-18);
     does_parse_float_and_double_like_cpp(8925500e-24);
     does_parse_float_and_double_like_cpp(89256e-22);
     does_parse_float_and_double_like_cpp(89254e-22);
+#endif
 
     does_parse_float_and_double_like_cpp(3.518437208883201171875e13);
     does_parse_float_and_double_like_cpp(62.5364939768271845828);
@@ -389,9 +412,14 @@ TEST_CASE(simply_cases)
     EXPECT_EQ(0., double_parse_function("2.4703282292062327208828439643411068618252990130716238221279284125033775363510437593264991818081799618989828234772285886546332835517796989819938739800539093906315035659515570226392290858392449105184435931802849936536152500319370457678249219365623669863658480757001585769269903706311928279558551332927834338409351978015531246597263579574622766465272827220056374006485499977096599470454020828166226237857393450736339007967761930577506740176324673600968951340535537458516661134223766678604162159680461914467291840300530057530849048765391711386591646239524912623653881879636239373280423891018672348497668235089863388587925628302755995657524455507255189313690836254779186948667994968324049705821028513185451396213837722826145437693412532098591327667236328124999e-324"sv));
 
 #define gives_equal_to(expected_val, str) \
-    EXPECT_EQ(expected_val, double_parse_function(str##sv));
+    EXPECT_EQ(bit_cast<u64>(expected_val), bit_cast<u64>(double_parse_function(str##sv)));
 
-    gives_equal_to(0.0, "1e-324");
+    gives_equal_to(0., "1e-324");
+    gives_equal_to(-0., "-1e-324");
+    gives_equal_to(.09289376810193062, "+.09289376810193062");
+    gives_equal_to(-.09289376810193062, "-.09289376810193062");
+    gives_equal_to(0., "+.0e10");
+    gives_equal_to(-0., "-.0e10");
 
 #define gives_infinity(str)                                                                  \
     EXPECT_EQ(__builtin_huge_val(), double_parse_function(str##sv));                         \
@@ -410,6 +438,7 @@ TEST_CASE(simply_cases)
     gives_infinity("3e70000000");
     gives_infinity("1e681");
     gives_infinity("7e312");
+    gives_infinity("184467440737095516151234567890e2147483639");
 }
 
 TEST_CASE(partial_parse_stops_at_right_spot)
@@ -448,8 +477,16 @@ TEST_CASE(invalid_parse)
     } while (false)
 
     EXPECT_PARSE_TO_FAIL("");
+    EXPECT_PARSE_TO_FAIL("e");
     EXPECT_PARSE_TO_FAIL(".");
+    EXPECT_PARSE_TO_FAIL("-.");
+    EXPECT_PARSE_TO_FAIL("+.");
+    EXPECT_PARSE_TO_FAIL(".e");
+    EXPECT_PARSE_TO_FAIL("-.e");
+    EXPECT_PARSE_TO_FAIL("+.e");
     EXPECT_PARSE_TO_FAIL(".e1");
+    EXPECT_PARSE_TO_FAIL("-.e1");
+    EXPECT_PARSE_TO_FAIL("+.e1");
 
     EXPECT_PARSE_TO_FAIL("++2");
     EXPECT_PARSE_TO_FAIL("++1");
@@ -488,4 +525,62 @@ TEST_CASE(detect_out_of_range_values)
     EXPECT_PARSE_TO_HAVE_ERROR("-10e-10000", AK::FloatingPointError::RoundedDownToZero);
     EXPECT_PARSE_TO_HAVE_ERROR("10e10000", AK::FloatingPointError::OutOfRange);
     EXPECT_PARSE_TO_HAVE_ERROR("-10e10000", AK::FloatingPointError::OutOfRange);
+}
+
+static bool parse_completely_passes(StringView view)
+{
+    char const* start = view.characters_without_null_termination();
+    return parse_floating_point_completely<double>(start, start + view.length()).has_value();
+}
+
+TEST_CASE(parse_completely_must_be_just_floating_point)
+{
+#define EXPECT_PARSE_COMPLETELY_TO_FAIL(value) \
+    EXPECT(!parse_completely_passes(value##sv))
+
+    EXPECT_PARSE_COMPLETELY_TO_FAIL("");
+    EXPECT_PARSE_COMPLETELY_TO_FAIL("-");
+    EXPECT_PARSE_COMPLETELY_TO_FAIL("+");
+    EXPECT_PARSE_COMPLETELY_TO_FAIL("++1");
+    EXPECT_PARSE_COMPLETELY_TO_FAIL("+-1");
+    EXPECT_PARSE_COMPLETELY_TO_FAIL("-+1");
+    EXPECT_PARSE_COMPLETELY_TO_FAIL("--1");
+
+    EXPECT_PARSE_COMPLETELY_TO_FAIL("1 ");
+    EXPECT_PARSE_COMPLETELY_TO_FAIL("1. ");
+    EXPECT_PARSE_COMPLETELY_TO_FAIL("1e ");
+    EXPECT_PARSE_COMPLETELY_TO_FAIL("1.e ");
+    EXPECT_PARSE_COMPLETELY_TO_FAIL("1.e123 ");
+
+    EXPECT_PARSE_COMPLETELY_TO_FAIL("-1 ");
+    EXPECT_PARSE_COMPLETELY_TO_FAIL("-1. ");
+    EXPECT_PARSE_COMPLETELY_TO_FAIL("-1e ");
+    EXPECT_PARSE_COMPLETELY_TO_FAIL("-1.e ");
+    EXPECT_PARSE_COMPLETELY_TO_FAIL("-1.e123 ");
+
+    EXPECT_PARSE_COMPLETELY_TO_FAIL("1A");
+    EXPECT_PARSE_COMPLETELY_TO_FAIL("1.C");
+    EXPECT_PARSE_COMPLETELY_TO_FAIL("1e*");
+    EXPECT_PARSE_COMPLETELY_TO_FAIL("1.e(");
+    EXPECT_PARSE_COMPLETELY_TO_FAIL("1.e123]");
+    EXPECT_PARSE_COMPLETELY_TO_FAIL("1.e123&");
+    EXPECT_PARSE_COMPLETELY_TO_FAIL("1.e123               ");
+
+    EXPECT_PARSE_COMPLETELY_TO_FAIL(":1234567890");
+    EXPECT_PARSE_COMPLETELY_TO_FAIL("1:234567890");
+    EXPECT_PARSE_COMPLETELY_TO_FAIL("12:34567890");
+    EXPECT_PARSE_COMPLETELY_TO_FAIL("123:4567890");
+    EXPECT_PARSE_COMPLETELY_TO_FAIL("1234:567890");
+    EXPECT_PARSE_COMPLETELY_TO_FAIL("12345:67890");
+    EXPECT_PARSE_COMPLETELY_TO_FAIL("123456:7890");
+    EXPECT_PARSE_COMPLETELY_TO_FAIL("1234567:890");
+    EXPECT_PARSE_COMPLETELY_TO_FAIL("12345678:90");
+    EXPECT_PARSE_COMPLETELY_TO_FAIL("123456789:0");
+    EXPECT_PARSE_COMPLETELY_TO_FAIL("1234567890:");
+
+    EXPECT_PARSE_COMPLETELY_TO_FAIL("1;234567890");
+    EXPECT_PARSE_COMPLETELY_TO_FAIL("1234567;890");
+
+    EXPECT_PARSE_COMPLETELY_TO_FAIL("1=234567890");
+    EXPECT_PARSE_COMPLETELY_TO_FAIL("1234567=890");
 }
