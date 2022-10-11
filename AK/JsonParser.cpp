@@ -190,6 +190,8 @@ ErrorOr<JsonValue> JsonParser::parse_number()
 {
     Vector<char, 32> number_buffer;
 
+    auto start_index = tell();
+
     bool negative = false;
     if (peek() == '-') {
         number_buffer.append('-');
@@ -200,7 +202,7 @@ ErrorOr<JsonValue> JsonParser::parse_number()
             return Error::from_string_literal("JsonParser: Unexpected '-' without further digits");
     }
 
-    auto fallback_to_double_parse = [&, start_index = tell()]() -> ErrorOr<JsonValue> {
+    auto fallback_to_double_parse = [&]() -> ErrorOr<JsonValue> {
 #ifdef KERNEL
 #    error JSONParser is currently not available for the Kernel because it disallows floating point. \
        If you want to make this KERNEL compatible you can just make this fallback_to_double \
@@ -210,7 +212,7 @@ ErrorOr<JsonValue> JsonParser::parse_number()
         //        use that in the floating point parser.
 
         // The first part should be just ascii digits
-        StringView view = m_input.substring_view(start_index - negative);
+        StringView view = m_input.substring_view(start_index);
 
         char const* start = view.characters_without_null_termination();
         auto parse_result = parse_first_floating_point(start, start + view.length());
