@@ -1414,6 +1414,7 @@ ThrowCompletionOr<DurationRecord> parse_temporal_duration_string(VM& vm, String 
     // FIXME: I can has StringView::to<double>()?
 
     // 4. Let yearsMV be ! ToIntegerOrInfinity(CodePointsToString(years)).
+    // FIXME: Don't use strtod to not have locale problems and below
     auto years = strtod(String { years_part.value_or("0"sv) }.characters(), nullptr);
 
     // 5. Let monthsMV be ! ToIntegerOrInfinity(CodePointsToString(months)).
@@ -1443,11 +1444,13 @@ ThrowCompletionOr<DurationRecord> parse_temporal_duration_string(VM& vm, String 
         auto f_hours_scale = (double)f_hours_digits.length();
 
         // d. Let minutesMV be ! ToIntegerOrInfinity(fHoursDigits) / 10^fHoursScale × 60.
+        // FIXME: Don't use strtod to not have locale problems
         minutes = strtod(String { f_hours_digits }.characters(), nullptr) / pow(10, f_hours_scale) * 60;
     }
     // 10. Else,
     else {
         // a. Let minutesMV be ! ToIntegerOrInfinity(CodePointsToString(minutes)).
+        // FIXME: Don't use strtod to not have locale problems
         minutes = strtod(String { minutes_part.value_or("0"sv) }.characters(), nullptr);
     }
 
@@ -1466,11 +1469,13 @@ ThrowCompletionOr<DurationRecord> parse_temporal_duration_string(VM& vm, String 
         auto f_minutes_scale = (double)f_minutes_digits.length();
 
         // d. Let secondsMV be ! ToIntegerOrInfinity(fMinutesDigits) / 10^fMinutesScale × 60.
+        // FIXME: Don't use strtod to not have locale problems
         seconds = strtod(String { f_minutes_digits }.characters(), nullptr) / pow(10, f_minutes_scale) * 60;
     }
     // 12. Else if seconds is not empty, then
     else if (seconds_part.has_value()) {
         // a. Let secondsMV be ! ToIntegerOrInfinity(CodePointsToString(seconds)).
+        // FIXME: Don't use strtod to not have locale problems
         seconds = strtod(String { *seconds_part }.characters(), nullptr);
     }
     // 13. Else,
@@ -1490,6 +1495,7 @@ ThrowCompletionOr<DurationRecord> parse_temporal_duration_string(VM& vm, String 
         auto f_seconds_scale = (double)f_seconds_digits.length();
 
         // c. Let millisecondsMV be ! ToIntegerOrInfinity(fSecondsDigits) / 10^fSecondsScale × 1000.
+        // FIXME: Don't use strtod to not have locale problems
         milliseconds = strtod(String { f_seconds_digits }.characters(), nullptr) / pow(10, f_seconds_scale) * 1000;
     }
     // 15. Else,
