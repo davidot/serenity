@@ -640,6 +640,8 @@ float Tokenizer::convert_a_string_to_a_number(StringView string)
     VERIFY(position == string.length());
 
     // Return the number s·(i + f·10^-d)·10^te.
+    // FIXME: This is probably wrong for a bunch of cases we should use the new parser
+    //        Although currently it doesn't support floats yet...
     return sign * (integer_part + fractional_part * powf(10, -fractional_digits)) * powf(10, exponent_sign * exponent);
 }
 
