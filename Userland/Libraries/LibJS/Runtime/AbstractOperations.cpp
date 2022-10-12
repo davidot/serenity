@@ -1189,6 +1189,7 @@ CanonicalIndex canonical_numeric_index_string(PropertyKey const& property_key, C
 
     // 2. Let n be ! ToNumber(argument).
     char* endptr;
+    // FIXME: Don't use strtod to not have locale problems
     auto n = Value(strtod(argument.characters(), &endptr));
     if (endptr != argument.characters() + argument.length())
         return CanonicalIndex(CanonicalIndex::Type::Undefined, 0);
