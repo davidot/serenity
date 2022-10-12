@@ -22,6 +22,7 @@ PluralRules::PluralRules(Object& prototype)
 {
     // 1.Let n be ! ToNumber(s).
     char* end { nullptr };
+    // FIXME: Don't use strtod to not have locale problems
     auto number = strtod(string.characters(), &end);
     VERIFY(!*end);
 
