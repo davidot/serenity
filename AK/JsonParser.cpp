@@ -187,6 +187,8 @@ ErrorOr<JsonValue> JsonParser::parse_string()
 
 ErrorOr<JsonValue> JsonParser::parse_number()
 {
+    // FIXME: Use the new parser :)
+    //        This one is very bad (for exact numbers)
     JsonValue value;
     Vector<char, 128> number_buffer;
     Vector<char, 128> fraction_buffer;
