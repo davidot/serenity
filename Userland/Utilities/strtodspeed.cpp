@@ -40,12 +40,12 @@
 
 [[maybe_unused]] static double new_parser(String const& input)
 {
-    return parse_floating_point_completely<double>(input.view()).release_value();
+    return input.to_double(AK::TrimWhitespace::No).release_value();
 }
 
 [[maybe_unused]] static float new_parserf(String const& input)
 {
-    return parse_floating_point_completely<float>(input.view()).release_value();
+    return input.to_double<float>(AK::TrimWhitespace::No).release_value();
 }
 
 [[maybe_unused]] static float css_parserf(String const& input)
@@ -122,7 +122,7 @@ ErrorOr<int> serenity_main(Main::Arguments arguments)
             }
         }
 
-#define string_to_double_function json_parse_double
+#define string_to_double_function new_parser
 
         if (check_bits) {
             // Just perform the check once
