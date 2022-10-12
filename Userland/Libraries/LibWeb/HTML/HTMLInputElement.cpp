@@ -447,6 +447,8 @@ String HTMLInputElement::value_sanitization_algorithm(String value) const
     } else if (type_state() == HTMLInputElement::TypeAttributeState::Number) {
         // If the value of the element is not a valid floating-point number, then set it to the empty string instead.
         char* end_ptr;
+
+        // FIXME: Don't use strtod to not have locale problems
         auto val = strtod(value.characters(), &end_ptr);
         if (!isfinite(val) || *end_ptr)
             return "";
