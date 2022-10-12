@@ -7,6 +7,8 @@
 // I don't think this needs to stay so ignore this file
 
 #include "AK/FloatingPointStringConversions.h"
+#include "AK/Statistics.h"
+#include "LibCore/ElapsedTimer.h"
 #include "LibCore/File.h"
 #include "LibCore/Stream.h"
 #include "LibTest/TestRunnerUtil.h"
@@ -15,6 +17,7 @@
 #include <AK/QuickSort.h>
 #include <LibCore/ArgsParser.h>
 #include <LibMain/Main.h>
+#include <LibWeb/CSS/Parser/Tokenizer.h>
 
 [[maybe_unused]] static double parse_via_strtod(String const& input)
 {
@@ -37,17 +40,22 @@
 
 [[maybe_unused]] static double new_parser(String const& input)
 {
-    return parse_double(input.view());
+    return parse_floating_point_completely<double>(input.view()).release_value();
 }
 
 [[maybe_unused]] static float new_parserf(String const& input)
 {
-    return parse_float(input.view());
+    return parse_floating_point_completely<float>(input.view()).release_value();
 }
 
-[[maybe_unused]] static double new_parser_float(String const& input)
+[[maybe_unused]] static float css_parserf(String const& input)
 {
-    return parse_float(input.view());
+    Web::CSS::Parser::Tokenizer tokenizer { input, "utf-8" };
+    auto tokens = tokenizer.parse();
+    if (tokens.size() != 2 || tokens.first().type() != Web::CSS::Parser::Token::Type::Number)
+        return __builtin_nan("");
+
+    return tokens[0].number_value();
 }
 
 ErrorOr<int> serenity_main(Main::Arguments arguments)
@@ -57,7 +65,7 @@ ErrorOr<int> serenity_main(Main::Arguments arguments)
     bool check_bits = false;
     bool output_all_failures = false;
     char const* parser = "strtod";
-    bool small = true;
+    bool small = false;
 
     Core::ArgsParser args_parser;
     args_parser.set_general_help("double parse speed test this probably doesn't belong in the repo");
@@ -114,7 +122,7 @@ ErrorOr<int> serenity_main(Main::Arguments arguments)
             }
         }
 
-#define string_to_double_function new_parserf
+#define string_to_double_function json_parse_double
 
         if (check_bits) {
             // Just perform the check once
@@ -133,8 +141,8 @@ ErrorOr<int> serenity_main(Main::Arguments arguments)
                     ++failures;
                     if (output_all_failures)
                         warnln("When parsing '{}' got [{:016x}] expected {} [{:016x}]", lines[i], bit_value, bit_cast<double>(expected_bits[i]), expected_bits[i]);
-                    if (lines[i].length() < 22 && !lines[i].contains("e"sv, AK::CaseSensitivity::CaseInsensitive))
-                        warnln("Short failure when parsing '{}' got [{:016x}] expected {} [{:016x}]", lines[i], bit_value, bit_cast<double>(expected_bits[i]), expected_bits[i]);
+                    //                    if (lines[i].length() < 22 && !lines[i].contains("e"sv, AK::CaseSensitivity::CaseInsensitive))
+                    //                        warnln("Short failure when parsing '{}' got [{:016x}] expected {} [{:016x}]", lines[i], bit_value, bit_cast<double>(expected_bits[i]), expected_bits[i]);
                 }
             }
 
@@ -143,7 +151,9 @@ ErrorOr<int> serenity_main(Main::Arguments arguments)
             total_tests += lines.size();
         }
 
+        AK::Statistics iteration_times;
         for (int i = 0; i < times; ++i) {
+            auto timer = Core::ElapsedTimer::start_new();
             size_t non_nan_values = 0;
             double max = -__builtin_huge_val();
 
@@ -155,8 +165,10 @@ ErrorOr<int> serenity_main(Main::Arguments arguments)
                         max = value;
                 }
             }
-            outln("From {}/{} non NaNs got max {}", non_nan_values, lines.size(), max);
+            dbgln("From {}/{} non NaNs got max {} [{} ms]", non_nan_values, lines.size(), max, timer.elapsed());
+            iteration_times.add(timer.elapsed());
         }
+        outln("avg: {}", iteration_times.average());
     }
 
     if (check_bits) {
@@ -164,6 +176,7 @@ ErrorOr<int> serenity_main(Main::Arguments arguments)
         outln("got {} / {} total failures", total_failures, total_tests);
         // strtod 3720645 / 5268191 -> 70% failures
         // json   4573817 / 5268191 -> 86% failures
+        // css fl  593928 / 5268191 -> 11% failures but note that the test suite is double focussed
         // new          0 / 5268191 :) 0% failures
         // total  5268191
     }
