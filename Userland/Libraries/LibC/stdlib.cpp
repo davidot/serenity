@@ -6,6 +6,7 @@
 
 #include "AK/FloatingPointStringConversions.h"
 #include <AK/Assertions.h>
+#include <AK/CharacterTypes.h>
 #include <AK/HashMap.h>
 #include <AK/Noncopyable.h>
 #include <AK/Random.h>
@@ -236,23 +237,25 @@ static T strtofloatingpoint(char const* str, char** endptr)
     // An initial, possibly empty, sequence of white-space characters (as specified by isspace())
     strtons(parse_ptr, &parse_ptr);
 
-    // We have to parse the sign first since
-    const Sign sign = strtosign(parse_ptr, &parse_ptr);
-
-    // FIXME: Can we avoid this strlen, we might need an extra API point
+    // FIXME: This strlen can be very expensive if we are parsing the first value of a long string
+    //        we can also stop at the first white space or other characters which will never occur
+    //        in a floating point.
     auto length = strlen(parse_ptr);
     StringView view { parse_ptr, length };
 
     // A subject sequence interpreted as a floating-point constant or representing infinity or NaN
 
     AK::FloatingPointParseResults<T> double_parse_result;
-    if (view.length() > 2 && view[0] == '0' && (view[1] == 'x' || view[1] == 'X')) {
+    if (auto starts_with_negative = view.starts_with("-0x"sv);
+        (starts_with_negative && view.length() > 3 && is_ascii_hex_digit(view[3]))
+        || (view.starts_with("0x"sv) && view.length() > 2
+            && (is_ascii_hex_digit(view[2]) || view[2] == '.' || view[2] == 'p' || view[2] == 'P'))) {
         // A 0x or 0X, then a non-empty sequence of hexadecimal digits optionally containing a radix character;
         // then an optional binary exponent part consisting of the character 'p' or the character 'P',
         // optionally followed by a '+' or '-' character, and then followed by one or more decimal digits
 
         // Note in particular
-        double_parse_result = AK::parse_first_hexfloat<T>(parse_ptr + 2, parse_ptr + length);
+        double_parse_result = AK::parse_first_hexfloat<T>(parse_ptr, parse_ptr + length);
     } else {
         // A non-empty sequence of decimal digits optionally containing a radix character;
         // then an optional exponent part consisting of the character 'e' or the character 'E',
@@ -268,8 +271,6 @@ static T strtofloatingpoint(char const* str, char** endptr)
 
         if (endptr)
             *endptr = const_cast<char*>(double_parse_result.end_ptr);
-        if (sign == Negative)
-            double_parse_result.value = -double_parse_result.value;
         return double_parse_result.value;
     }
 
@@ -280,9 +281,6 @@ static T strtofloatingpoint(char const* str, char** endptr)
 
         if (endptr)
             *endptr = const_cast<char*>(double_parse_result.end_ptr);
-
-        if (sign == Negative)
-            double_parse_result.value = -double_parse_result.value;
         return double_parse_result.value;
     }
 
@@ -290,6 +288,8 @@ static T strtofloatingpoint(char const* str, char** endptr)
     // So the only cases left are:
     // - One of INF or INFINITY, ignoring case
     // - One of NAN or NAN(n-char-sequenceopt), ignoring case in the NAN part
+
+    const Sign sign = strtosign(parse_ptr, &parse_ptr);
 
     if (is_infinity_string(parse_ptr, endptr)) {
         // Don't set errno to ERANGE here:
@@ -304,6 +304,7 @@ static T strtofloatingpoint(char const* str, char** endptr)
 
     if (is_nan_string(parse_ptr, endptr)) {
         errno = ERANGE;
+        // FIXME: Do we actually want to return "different" NaN bit values?
         if (sign != Sign::Negative)
             return static_cast<T>(__builtin_nan(""));
         else
@@ -312,7 +313,7 @@ static T strtofloatingpoint(char const* str, char** endptr)
 
     // If no conversion could be performed, 0 shall be returned, and errno may be set to [EINVAL].
     // FIXME: This is in the posix standard linked from strtod but not in implementations of strtod
-    errno = EINVAL;
+    //        and not in the man pages for linux strtod.
     if (endptr)
         *endptr = const_cast<char*>(str);
     return 0;
