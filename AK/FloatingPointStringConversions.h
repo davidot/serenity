@@ -7,7 +7,8 @@
 #pragma once
 
 #ifdef KERNEL
-#    error This file should not be included in the KERNEL!
+#    error This file should not be included in the KERNEL as it deals with doubles \
+           and there is no guraantee it won't do floating point computation.
 #endif
 
 #include <AK/StringView.h>
