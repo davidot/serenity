@@ -418,8 +418,12 @@ Value JSONObject::parse_json_value(VM& vm, JsonValue const& value)
         return js_null();
     if (value.is_double())
         return Value(value.as_double());
-    if (value.is_number())
+    if (value.is_number()) {
+        // FIXME: THIS IS VERY WRONG SINCE JSON USES UPTO u64 INTERNALLY FOR INTEGERS!!!!!
+        // > JSON.parse("1234567890123")
+        // 1912276171
         return Value(value.to_i32(0));
+    }
     if (value.is_string())
         return js_string(vm, value.to_string());
     if (value.is_bool())
