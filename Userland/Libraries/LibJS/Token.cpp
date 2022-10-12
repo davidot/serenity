@@ -80,7 +80,8 @@ double Token::double_value() const
                 return static_cast<double>(strtoul(value_string.characters() + 1, nullptr, 8));
         }
     }
-    return parse_floating_point_completely<double>(value_string.view()).value_or(__builtin_nan(""));
+    // This should always be a valid double
+    return value_string.to_double().release_value();
 }
 
 static u32 hex2int(char x)
