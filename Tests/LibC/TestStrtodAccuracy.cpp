@@ -1,5 +1,6 @@
 /*
  * Copyright (c) 2020, Ben Wiederhake <BenWiederhake.GitHub@gmx.de>
+ * Copyright (c) 2022, David Tuin <davidot@serenityos.org>
  *
  * SPDX-License-Identifier: BSD-2-Clause
  */
@@ -354,4 +355,56 @@ TEST_CASE(strtod_accuracy)
     }
 
     outln("PASS (with leniency up to {} ULP from the exact solution)", LENIENCY);
+}
+
+TEST_CASE(test_strtod_sets_errno)
+{
+#define EXPECT_TO_GIVE_VALUE_WITH_0_ERRNO(str_value, double_value) \
+    do {                                                           \
+        errno = 0;                                                 \
+        auto value = strtod(str_value, nullptr);                   \
+        EXPECT_EQ(errno, 0);                                       \
+        EXPECT_EQ(value, static_cast<double>(double_value));       \
+    } while (false)
+
+    // Leading zeros are allowed
+    EXPECT_TO_GIVE_VALUE_WITH_0_ERRNO("0", 0.);
+    EXPECT_TO_GIVE_VALUE_WITH_0_ERRNO("00", 0.);
+    EXPECT_TO_GIVE_VALUE_WITH_0_ERRNO("000", 0.);
+
+    // FIXME: Verify we only parse up to the appropriate point
+    EXPECT_TO_GIVE_VALUE_WITH_0_ERRNO("0xT", 0.);
+    EXPECT_TO_GIVE_VALUE_WITH_0_ERRNO("0xp20", 0.);
+    EXPECT_TO_GIVE_VALUE_WITH_0_ERRNO("0x.t", 0.);
+    EXPECT_TO_GIVE_VALUE_WITH_0_ERRNO("0x.pt", 0.);
+    EXPECT_TO_GIVE_VALUE_WITH_0_ERRNO("0x1.p0", 1.);
+    EXPECT_TO_GIVE_VALUE_WITH_0_ERRNO("0x1.pa", 1.);
+
+    EXPECT_TO_GIVE_VALUE_WITH_0_ERRNO("1", 1.);
+    EXPECT_TO_GIVE_VALUE_WITH_0_ERRNO("10e10", 10e10);
+    EXPECT_TO_GIVE_VALUE_WITH_0_ERRNO("10.10e10", 10.10e10);
+
+    EXPECT_TO_GIVE_VALUE_WITH_0_ERRNO("inf", __builtin_huge_val());
+    EXPECT_TO_GIVE_VALUE_WITH_0_ERRNO("infinity", __builtin_huge_val());
+    EXPECT_TO_GIVE_VALUE_WITH_0_ERRNO("INF", __builtin_huge_val());
+    EXPECT_TO_GIVE_VALUE_WITH_0_ERRNO("INFINITY", __builtin_huge_val());
+
+    EXPECT_TO_GIVE_VALUE_WITH_0_ERRNO("Inf", __builtin_huge_val());
+    EXPECT_TO_GIVE_VALUE_WITH_0_ERRNO("iNf", __builtin_huge_val());
+    EXPECT_TO_GIVE_VALUE_WITH_0_ERRNO("inF", __builtin_huge_val());
+
+    EXPECT_TO_GIVE_VALUE_WITH_0_ERRNO("-inf", -__builtin_huge_val());
+    EXPECT_TO_GIVE_VALUE_WITH_0_ERRNO("-infinity", -__builtin_huge_val());
+    EXPECT_TO_GIVE_VALUE_WITH_0_ERRNO("-INF", -__builtin_huge_val());
+    EXPECT_TO_GIVE_VALUE_WITH_0_ERRNO("-INFINITY", -__builtin_huge_val());
+
+#define EXPECT_TO_GIVE_VALUE_WITH_ERRNO(str_value, double_value, errno_value) \
+    do {                                                                      \
+        errno = 0;                                                            \
+        auto value = strtod(str_value, nullptr);                              \
+        EXPECT_EQ(errno, errno_value);                                        \
+        EXPECT_EQ(value, static_cast<double>(double_value));                  \
+    } while (false)
+
+    EXPECT_TO_GIVE_VALUE_WITH_ERRNO("nan", __builtin_nan(""), ERANGE);
 }
