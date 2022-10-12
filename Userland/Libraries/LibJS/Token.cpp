@@ -79,6 +79,8 @@ double Token::double_value() const
                 return static_cast<double>(strtoul(value_string.characters() + 1, nullptr, 8));
         }
     }
+    // FIXME: Don't use strtod to not have locale problems
+    //        Use the new parser instead
     return strtod(value_string.characters(), nullptr);
 }
 
