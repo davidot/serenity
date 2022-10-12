@@ -572,7 +572,7 @@ float Tokenizer::convert_a_string_to_a_number(StringView string)
 {
     // FIXME: We already found the whole part, fraction part and exponent during
     //        validation, we could probably skip
-    return parse_floating_point_completely<float>(string).release_value();
+    return string.to_double<float>(AK::TrimWhitespace::No).release_value();
 }
 
 // https://www.w3.org/TR/css-syntax-3/#consume-name
