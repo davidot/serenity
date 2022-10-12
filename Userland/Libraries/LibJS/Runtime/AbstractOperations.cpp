@@ -1181,7 +1181,7 @@ CanonicalIndex canonical_numeric_index_string(PropertyKey const& property_key, C
     }
 
     // Short circuit a few common cases
-    if (argument == "Infinity" || argument == "-Infinity" || argument == "NaN")
+    if (argument == "Infinity"sv || argument == "-Infinity"sv || argument == "NaN"sv)
         return CanonicalIndex(CanonicalIndex::Type::Numeric, 0);
 
     // Short circuit any string that doesn't start with digits
@@ -1189,14 +1189,12 @@ CanonicalIndex canonical_numeric_index_string(PropertyKey const& property_key, C
         return CanonicalIndex(CanonicalIndex::Type::Undefined, 0);
 
     // 2. Let n be ! ToNumber(argument).
-    auto double_or_failure = parse_floating_point_completely<double>(argument);
+    auto double_or_failure = argument.to_double(AK::TrimWhitespace::No);
     if (!double_or_failure.has_value())
         return CanonicalIndex(CanonicalIndex::Type::Undefined, 0);
     auto double_value = Value(double_or_failure.value());
 
-    // FIXME: We always return 0 here, which seems very incorrect.
-    //        We just seem to avoid actual failures because we convert strings to
-    //        Integers in property_key.is_number() at the top of this function.
+    // FIXME: We return 0 instead of n but it might not observable?
     // 3. If SameValue(! ToString(n), argument) is true, return n.
     if (double_value.to_string_without_side_effects() == argument)
         return CanonicalIndex(CanonicalIndex::Type::Numeric, 0);
