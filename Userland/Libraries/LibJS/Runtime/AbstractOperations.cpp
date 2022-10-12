@@ -6,6 +6,7 @@
  */
 
 #include <AK/CharacterTypes.h>
+#include <AK/FloatingPointStringConversions.h>
 #include <AK/Function.h>
 #include <AK/Optional.h>
 #include <AK/Utf16View.h>
@@ -1188,14 +1189,16 @@ CanonicalIndex canonical_numeric_index_string(PropertyKey const& property_key, C
         return CanonicalIndex(CanonicalIndex::Type::Undefined, 0);
 
     // 2. Let n be ! ToNumber(argument).
-    char* endptr;
-    // FIXME: Don't use strtod to not have locale problems
-    auto n = Value(strtod(argument.characters(), &endptr));
-    if (endptr != argument.characters() + argument.length())
+    auto double_or_failure = parse_floating_point_completely<double>(argument);
+    if (!double_or_failure.has_value())
         return CanonicalIndex(CanonicalIndex::Type::Undefined, 0);
+    auto double_value = Value(double_or_failure.value());
 
+    // FIXME: We always return 0 here, which seems very incorrect.
+    //        We just seem to avoid actual failures because we convert strings to
+    //        Integers in property_key.is_number() at the top of this function.
     // 3. If SameValue(! ToString(n), argument) is true, return n.
-    if (n.to_string_without_side_effects() == argument)
+    if (double_value.to_string_without_side_effects() == argument)
         return CanonicalIndex(CanonicalIndex::Type::Numeric, 0);
 
     // 4. Return undefined.
