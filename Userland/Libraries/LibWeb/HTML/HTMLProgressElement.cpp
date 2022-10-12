@@ -51,6 +51,7 @@ double HTMLProgressElement::value() const
     if (value_characters == nullptr)
         return 0;
 
+    // FIXME: Don't use strtod to not have locale problems
     auto parsed_value = strtod(value_characters, nullptr);
     if (!isfinite(parsed_value) || parsed_value < 0)
         return 0;
@@ -73,6 +74,7 @@ double HTMLProgressElement::max() const
     if (max_characters == nullptr)
         return 1;
 
+    // FIXME: Don't use strtod to not have locale problems
     auto parsed_value = strtod(max_characters, nullptr);
     if (!isfinite(parsed_value) || parsed_value <= 0)
         return 1;
