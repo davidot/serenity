@@ -550,6 +550,7 @@ static Optional<Value> string_to_number(StringView string)
     }
 
     char* endptr;
+    // FIXME: Don't use strtod to not have locale problems
     auto parsed_double = strtod(text.characters(), &endptr);
     if (*endptr)
         return js_nan();
