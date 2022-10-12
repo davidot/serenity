@@ -43,9 +43,6 @@ FloatingPointParseResults<T> parse_first_hexfloat(char const* start, char const*
 template<FloatingPoint T = double>
 Optional<T> parse_floating_point_completely(StringView view);
 
-template<FloatingPoint T = double>
-T decimal_floating_parts_to_value(StringView whole_part, StringView fractional_part, StringView exponent_part);
-
 }
 
 using AK::parse_first_floating_point;

@@ -70,20 +70,18 @@ TEST_CASE(hexfloat)
 #define does_parse_hex_double_like_cpp(value)                           \
     do {                                                                \
         EXPECT_EQ(static_cast<double>(value), newhex(#value##sv));      \
-        EXPECT_EQ(static_cast<double>(-value), newhex("-" #value##sv)); \
+        EXPECT_EQ(-static_cast<double>(value), newhex("-" #value##sv)); \
     } while (false)
 
 #define does_parse_hex_float_like_cpp(value)                               \
     do {                                                                   \
         EXPECT_EQ(static_cast<float>(value##f), newhexf(#value##sv));      \
-        EXPECT_EQ(static_cast<float>(-value##f), newhexf("-" #value##sv)); \
+        EXPECT_EQ(-static_cast<float>(value##f), newhexf("-" #value##sv)); \
     } while (false)
 
 #define does_parse_hex_float_and_double_like_cpp(value) \
     does_parse_hex_double_like_cpp(value);              \
     does_parse_hex_float_like_cpp(value)
-
-    return;
 
     does_parse_hex_float_and_double_like_cpp(0x123456789ABCDEFp0);
     does_parse_hex_float_and_double_like_cpp(0x123456789ABCDEFp+0);
@@ -130,6 +128,48 @@ TEST_CASE(hexfloat)
     does_parse_hex_double_like_cpp(0x1.0p-1022);
     does_parse_hex_double_like_cpp(0x000000000000000000000000000000000001.0p-1022);
     does_parse_hex_double_like_cpp(0x000000000000000000000000000000000001.000000000000000000p-1022);
+
+    does_parse_hex_float_and_double_like_cpp(0xCap0);
+    does_parse_hex_float_and_double_like_cpp(0xCAp0);
+    does_parse_hex_float_and_double_like_cpp(0xcAp0);
+    does_parse_hex_float_and_double_like_cpp(0xcAP0);
+    does_parse_hex_float_and_double_like_cpp(0xcaP0);
+    does_parse_hex_float_and_double_like_cpp(0xcap0);
+    does_parse_hex_float_and_double_like_cpp(0xcap1);
+    does_parse_hex_float_and_double_like_cpp(0xca.p1);
+    does_parse_hex_float_and_double_like_cpp(0xc.ap1);
+
+    does_parse_hex_float_and_double_like_cpp(0x1.p0);
+    does_parse_hex_float_and_double_like_cpp(0x11.p0);
+    does_parse_hex_float_and_double_like_cpp(0x11.p1);
+    does_parse_hex_float_and_double_like_cpp(0x11.p2);
+    does_parse_hex_float_and_double_like_cpp(0x11.p-2);
+    does_parse_hex_float_and_double_like_cpp(0x11.p-0);
+
+    //    dbgln("{:016x}", bit_cast<u64>(strtod("-0x1.p0", nullptr)));
+    //    outln("{:016x}", bit_cast<u64>(strtod("-0x1.p0", nullptr)));
+    outln("{:016x}", bit_cast<u64>(strtod("-0x1p-10000", nullptr)));
+}
+
+TEST_CASE(invalid_hex_floats)
+{
+#define EXPECT_HEX_PARSE_TO_VALUE_AND_CONSUME_CHARS(string_value, double_value, chars_parsed)     \
+    do {                                                                                          \
+        StringView view = string_value##sv;                                                       \
+        char const* start = view.characters_without_null_termination();                           \
+        auto result = parse_first_hexfloat<double>(start, start + view.length());                 \
+        EXPECT(result.error == AK::FloatingPointError::None);                                     \
+        EXPECT_EQ(bit_cast<u64>(result.value), bit_cast<u64>(static_cast<double>(double_value))); \
+        EXPECT_EQ(result.end_ptr - start, chars_parsed);                                          \
+    } while (false)
+
+    EXPECT_HEX_PARSE_TO_VALUE_AND_CONSUME_CHARS("0xab.cdpef", 0xab.cdp0, 7);
+    EXPECT_HEX_PARSE_TO_VALUE_AND_CONSUME_CHARS("0xab.cdPef", 0xab.cdp0, 7);
+    EXPECT_HEX_PARSE_TO_VALUE_AND_CONSUME_CHARS("0xab.cdPEf", 0xab.cdp0, 7);
+    EXPECT_HEX_PARSE_TO_VALUE_AND_CONSUME_CHARS("0xab.cdPEF", 0xab.cdp0, 7);
+    EXPECT_HEX_PARSE_TO_VALUE_AND_CONSUME_CHARS("0xAB.cdPEF", 0xab.cdp0, 7);
+    EXPECT_HEX_PARSE_TO_VALUE_AND_CONSUME_CHARS("0xABCDPEF", 0xabcdp0, 6);
+    EXPECT_HEX_PARSE_TO_VALUE_AND_CONSUME_CHARS("0xCAPE", 0xCAp0, 4);
 }
 
 TEST_CASE(simply_cases)
@@ -370,4 +410,82 @@ TEST_CASE(simply_cases)
     gives_infinity("3e70000000");
     gives_infinity("1e681");
     gives_infinity("7e312");
+}
+
+TEST_CASE(partial_parse_stops_at_right_spot)
+{
+#define EXPECT_PARSE_TO_VALUE_AND_CONSUME_CHARS(string_value, double_value, chars_parsed)         \
+    do {                                                                                          \
+        StringView view = string_value##sv;                                                       \
+        char const* start = view.characters_without_null_termination();                           \
+        auto result = parse_first_floating_point<double>(start, start + view.length());           \
+        EXPECT(result.error == AK::FloatingPointError::None);                                     \
+        EXPECT_EQ(bit_cast<u64>(result.value), bit_cast<u64>(static_cast<double>(double_value))); \
+        EXPECT_EQ(result.end_ptr - start, chars_parsed);                                          \
+    } while (false)
+
+    EXPECT_PARSE_TO_VALUE_AND_CONSUME_CHARS("0x", 0., 1);
+    EXPECT_PARSE_TO_VALUE_AND_CONSUME_CHARS("0e", 0., 1);
+    EXPECT_PARSE_TO_VALUE_AND_CONSUME_CHARS("0e+", 0., 1);
+    EXPECT_PARSE_TO_VALUE_AND_CONSUME_CHARS("0e1", 0., 3);
+    EXPECT_PARSE_TO_VALUE_AND_CONSUME_CHARS("0beef", 0., 1);
+    EXPECT_PARSE_TO_VALUE_AND_CONSUME_CHARS("0p123", 0., 1);
+    EXPECT_PARSE_TO_VALUE_AND_CONSUME_CHARS("0e1", 0., 3);
+    EXPECT_PARSE_TO_VALUE_AND_CONSUME_CHARS("0e1abc", 0., 3);
+    EXPECT_PARSE_TO_VALUE_AND_CONSUME_CHARS("0e1e1", 0., 3);
+    EXPECT_PARSE_TO_VALUE_AND_CONSUME_CHARS("0e1+", 0., 3);
+    EXPECT_PARSE_TO_VALUE_AND_CONSUME_CHARS("0e-+1", 0., 1);
+}
+
+TEST_CASE(invalid_parse)
+{
+#define EXPECT_PARSE_TO_FAIL(string_value)                                              \
+    do {                                                                                \
+        StringView view = string_value##sv;                                             \
+        char const* start = view.characters_without_null_termination();                 \
+        auto result = parse_first_floating_point<double>(start, start + view.length()); \
+        EXPECT(result.error == AK::FloatingPointError::NoOrInvalidInput);               \
+    } while (false)
+
+    EXPECT_PARSE_TO_FAIL("");
+    EXPECT_PARSE_TO_FAIL(".");
+    EXPECT_PARSE_TO_FAIL(".e1");
+
+    EXPECT_PARSE_TO_FAIL("++2");
+    EXPECT_PARSE_TO_FAIL("++1");
+    EXPECT_PARSE_TO_FAIL("++0");
+    EXPECT_PARSE_TO_FAIL("++2e1");
+    EXPECT_PARSE_TO_FAIL("++1e1");
+    EXPECT_PARSE_TO_FAIL("++0e1");
+
+#define EXPECT_MULTI_SIGNS_TO_FAIL(base_string) \
+    EXPECT_PARSE_TO_FAIL("++" base_string);     \
+    EXPECT_PARSE_TO_FAIL("--" base_string);     \
+    EXPECT_PARSE_TO_FAIL("+-" base_string);     \
+    EXPECT_PARSE_TO_FAIL("-+" base_string)
+
+    EXPECT_MULTI_SIGNS_TO_FAIL("1");
+    EXPECT_MULTI_SIGNS_TO_FAIL("1.");
+    EXPECT_MULTI_SIGNS_TO_FAIL("1e1");
+    EXPECT_MULTI_SIGNS_TO_FAIL("1.e1");
+    EXPECT_MULTI_SIGNS_TO_FAIL("1.0e1");
+    EXPECT_MULTI_SIGNS_TO_FAIL("1.0e+1");
+    EXPECT_MULTI_SIGNS_TO_FAIL("1.0e-1");
+}
+
+TEST_CASE(detect_out_of_range_values)
+{
+#define EXPECT_PARSE_TO_HAVE_ERROR(string_value, error_value)                           \
+    do {                                                                                \
+        StringView view = string_value##sv;                                             \
+        char const* start = view.characters_without_null_termination();                 \
+        auto result = parse_first_floating_point<double>(start, start + view.length()); \
+        EXPECT(result.error == error_value);                                            \
+        EXPECT(result.end_ptr == start + view.length());                                \
+    } while (false)
+
+    EXPECT_PARSE_TO_HAVE_ERROR("10e-10000", AK::FloatingPointError::RoundedDownToZero);
+    EXPECT_PARSE_TO_HAVE_ERROR("-10e-10000", AK::FloatingPointError::RoundedDownToZero);
+    EXPECT_PARSE_TO_HAVE_ERROR("10e10000", AK::FloatingPointError::OutOfRange);
+    EXPECT_PARSE_TO_HAVE_ERROR("-10e10000", AK::FloatingPointError::OutOfRange);
 }

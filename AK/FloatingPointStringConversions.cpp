@@ -7,6 +7,7 @@
 #include "FloatingPointStringConversions.h"
 #include "CharacterTypes.h"
 #include "Format.h"
+#include "ScopeGuard.h"
 #include "StringView.h"
 #include "UFixedBigInt.h"
 #include "Vector.h"
@@ -249,32 +250,23 @@ static void fast_parse_decimal(char const*& head, char const* end, I& value)
     }
 }
 
-static BasicParseResult parse_numbers(char const* ptr, char const* end)
+static BasicParseResult parse_numbers(char const* start, char const* end)
 {
-    StringView view { ptr, static_cast<size_t>(end - ptr) };
-    BasicParseResult result;
+    char const* ptr = start;
+    BasicParseResult result {};
 
-    result.negative = false;
+    if (ptr == end)
+        return result;
 
-    if (*ptr == '-') {
-        result.negative = true;
+    if (*ptr == '-' || *ptr == '+') {
+        result.negative = *ptr == '-';
         ++ptr;
 
-        if (ptr == end)
-            return FAIL_PARSE("only -");
-        if (!is_ascii_digit(*ptr) && *ptr != floating_point_decimal_separator)
-            return FAIL_PARSE("got {} after -", *ptr);
-    } else if (*ptr == '+') {
-        ++ptr;
-
-        if (ptr == end)
-            return FAIL_PARSE("only +");
-        if (!is_ascii_digit(*ptr) && *ptr != floating_point_decimal_separator)
-            return FAIL_PARSE("got {} after +", *ptr);
+        if (ptr == end || (!is_ascii_digit(*ptr) && *ptr != floating_point_decimal_separator))
+            return result;
     }
 
     u64 mantissa = 0;
-    // FIXME: Add cool parse 4/8 digits at a time!
     auto const* whole_part_start = ptr;
     fast_parse_decimal(ptr, end, mantissa);
     auto const* whole_part_end = ptr;
@@ -295,43 +287,56 @@ static BasicParseResult parse_numbers(char const* ptr, char const* end)
     digits_found += -exponent;
 
     if (digits_found == 0)
-        return FAIL_PARSE("No digits");
+        return result;
 
     i64 explicit_exponent = 0;
 
     if (ptr != end && (*ptr == 'e' || *ptr == 'E')) {
-        ++ptr;
-
-        if (ptr == end) {
-            // either ignore e or fail
-            return FAIL_PARSE("nothing after e");
-        }
-        bool negative_exponent = *ptr == '-';
-        if (*ptr == '-' || *ptr == '+')
+        // We do this in a lambda to easily be able to get out of parsing the exponent.
+        [&] {
+            auto* pointer_before_e = ptr;
+            ArmedScopeGuard reset_ptr { [&] { ptr = pointer_before_e; } };
             ++ptr;
 
-        if (ptr == end) {
-            // either ignore e[+-] or fail
-            return FAIL_PARSE("nothing after e[+-]");
-        }
+            if (ptr == end)
+                return;
 
-        // FIXME: Make sure that no digit is incorrect / gives the value up to the e
+            bool negative_exponent = false;
+            if (*ptr == '-' || *ptr == '+') {
+                negative_exponent = *ptr == '-';
+                ++ptr;
 
-        while (ptr != end && is_ascii_digit(*ptr)) {
-            if (explicit_exponent < 0x10000000)
-                explicit_exponent = 10 * explicit_exponent + (*ptr - '0');
-            ++ptr;
-        }
+                if (ptr == end)
+                    return;
+            }
 
-        explicit_exponent = negative_exponent ? -explicit_exponent : explicit_exponent;
-        exponent += explicit_exponent;
+            if (!is_ascii_digit(*ptr))
+                return;
+
+            // Now we must have an optional sign and at least one digit so we
+            // will not reset
+            reset_ptr.disarm();
+
+            while (ptr != end && is_ascii_digit(*ptr)) {
+                // A massive exponent is not really a problem as this would
+                // require a lot of characters so we would fallback on precise
+                // parsing anyway (this is already 268435456 digits or 10 megabytes of digits)
+                if (explicit_exponent < 0x10'000'000)
+                    explicit_exponent = 10 * explicit_exponent + (*ptr - '0');
+
+                ++ptr;
+            }
+
+            explicit_exponent = negative_exponent ? -explicit_exponent : explicit_exponent;
+            exponent += explicit_exponent;
+        }();
     }
 
     result.valid = true;
     result.last_parsed = ptr;
 
     if (digits_found > max_representable_power_of_ten_in_u64) {
-        // Oh oh we might have overflown mantissa....
+        // There could be overflow but because we just count the digits it could be leading zeros
         auto const* leading_digit = whole_part_start;
         while (leading_digit != end && (*leading_digit == '0' || *leading_digit == '.')) {
             if (*leading_digit == '0')
@@ -341,9 +346,8 @@ static BasicParseResult parse_numbers(char const* ptr, char const* end)
         }
 
         if (digits_found > max_representable_power_of_ten_in_u64) {
-
+            // If removing the leading zeros does not help we reparse and keep just the significant digits
             result.more_than_19_digits_with_overflow = true;
-            // Just truncate to upper 19 digits
 
             mantissa = 0;
             constexpr i64 smallest_nineteen_digit_number = { 1000000000000000000 };
@@ -415,7 +419,7 @@ static BasicParseResult parse_numbers(char const* ptr, char const* end)
         while (base >= bit129)
             base >>= 1u;
 
-        return base.low().low().low().low().low();
+        return u128 { base };
     }
 
     exponent *= -1;
@@ -2027,9 +2031,9 @@ struct HexFloatParseResult {
 static HexFloatParseResult parse_hexfloat(char const* start, char const* end)
 {
     HexFloatParseResult result {};
-    if (start == end) {
+    if (start == end)
         return result;
-    }
+
     char const* parse_head = start;
     bool any_digits = false;
     bool truncated_non_zero = false;
@@ -2063,9 +2067,8 @@ static HexFloatParseResult parse_hexfloat(char const* start, char const* end)
             return true;
         }
 
-        if (digit != 0) {
+        if (digit != 0)
             truncated_non_zero = true;
-        }
 
         return false;
     };
@@ -2091,34 +2094,48 @@ static HexFloatParseResult parse_hexfloat(char const* start, char const* end)
         result.exponent = -digits_after_separator * 4;
     }
 
-    if (!any_digits)
+    if (!any_digits) {
+        dbgln("no digits :( {}", start);
         return result;
+    }
 
     if (parse_head != end && (*parse_head == 'p' || *parse_head == 'P')) {
-        ++parse_head;
-        bool exponent_is_negative = false;
-        i64 explicit_exponent = 0;
-
-        if (parse_head != end && *parse_head == '-') {
-            exponent_is_negative = true;
+        [&] {
+            auto const* head_before_p = parse_head;
+            ArmedScopeGuard reset_ptr { [&] { parse_head = head_before_p; } };
             ++parse_head;
-        } else if (parse_head != end && *parse_head == '+') {
-            ++parse_head;
-        }
 
-        // FIXME: Check next value is digit and fail otherwise
+            if (parse_head == end)
+                return;
 
-        while (parse_head != end && is_ascii_hex_digit(*parse_head)) {
-            if (explicit_exponent < 0x10000000) {
-                explicit_exponent = 10 * explicit_exponent + (*parse_head - '0');
+            bool exponent_is_negative = false;
+            i64 explicit_exponent = 0;
+
+            if (*parse_head == '-' || *parse_head == '+') {
+                exponent_is_negative = *parse_head == '-';
+                ++parse_head;
+                if (parse_head == end)
+                    return;
             }
-            ++parse_head;
-        }
 
-        if (exponent_is_negative)
-            explicit_exponent = -explicit_exponent;
+            if (!is_ascii_digit(*parse_head))
+                return;
 
-        result.exponent += explicit_exponent;
+            // We have at least one digit (with optional preceding sign) so we will not reset
+            reset_ptr.disarm();
+
+            while (parse_head != end && is_ascii_digit(*parse_head)) {
+                if (explicit_exponent < 0x10000000) {
+                    explicit_exponent = 10 * explicit_exponent + (*parse_head - '0');
+                }
+                ++parse_head;
+            }
+
+            if (exponent_is_negative)
+                explicit_exponent = -explicit_exponent;
+
+            result.exponent += explicit_exponent;
+        }();
     }
 
     result.valid = true;
