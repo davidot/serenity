@@ -550,7 +550,7 @@ static Optional<Value> string_to_number(StringView string)
         return Value(bigint.to_double());
     }
 
-    auto parsed_double = parse_floating_point_completely<double>(text.view());
+    auto parsed_double = text.to_double(AK::TrimWhitespace::No);
     if (!parsed_double.has_value())
         return js_nan();
 
