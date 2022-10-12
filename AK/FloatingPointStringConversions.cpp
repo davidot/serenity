@@ -10,6 +10,7 @@
 #include "StringView.h"
 #include "UFixedBigInt.h"
 #include "Vector.h"
+#include <endian.h>
 
 namespace AK {
 
@@ -176,12 +177,14 @@ STATIC_ASSERT_EQUAL(FloatingPointInfo<double>::exponent_mask(), 0x7ff0'0000'0000
 STATIC_ASSERT_EQUAL(FloatingPointInfo<double>::sign_mask(), 0x8000'0000'0000'0000);
 STATIC_ASSERT_EQUAL(FloatingPointInfo<double>::minimum_exponent(), -1023);
 STATIC_ASSERT_EQUAL(FloatingPointInfo<double>::infinity_exponent(), 0x7ff);
+STATIC_ASSERT_EQUAL(FloatingPointInfo<double>::exponent_bias(), 1023);
 
 STATIC_ASSERT_EQUAL(FloatingPointInfo<float>::mantissa_mask(), 0x007f'ffff);
 STATIC_ASSERT_EQUAL(FloatingPointInfo<float>::exponent_mask(), 0x7f80'0000);
 STATIC_ASSERT_EQUAL(FloatingPointInfo<float>::sign_mask(), 0x8000'0000);
 STATIC_ASSERT_EQUAL(FloatingPointInfo<float>::minimum_exponent(), -127);
 STATIC_ASSERT_EQUAL(FloatingPointInfo<float>::infinity_exponent(), 0xff);
+STATIC_ASSERT_EQUAL(FloatingPointInfo<float>::exponent_bias(), 127);
 
 struct BasicParseResult {
     u64 mantissa = 0;
@@ -189,25 +192,67 @@ struct BasicParseResult {
     bool valid = false;
     bool negative = false;
     bool more_than_19_digits_with_overflow = false;
-    char const* end { nullptr };
+    char const* last_parsed { nullptr };
     StringView whole_part;
     StringView fractional_part;
 };
 
 static constexpr auto max_representable_power_of_ten_in_u64 = 19;
-static_assert(1e19 <= NumericLimits<u64>::max());
-static_assert(1e20 >= NumericLimits<u64>::max());
+static_assert(1e19 <= static_cast<double>(NumericLimits<u64>::max()));
+static_assert(1e20 >= static_cast<double>(NumericLimits<u64>::max()));
 
-#define FAIL_PARSE(message, ...) ({ dbgln(message __VA_OPT__(,) __VA_ARGS__); result; })
+#define PARSE_8_AT_A_TIME 1
 
-#define T2ODO(val) ({ dbgln("failed on {} because {}", view, val); })
+#ifdef PARSE_8_AT_A_TIME
+#    if __BYTE_ORDER__ == __ORDER_BIG_ENDIAN__
+#        error Float parsing currently assumes little endian, this fact is only used in fast parsing of 8 digits at a time
+#    endif
+constexpr u64 read_eight_digits(char const* string)
+{
+    u64 val;
+    __builtin_memcpy(&val, string, sizeof(val));
+    return val;
+}
+
+static bool has_eight_digits(u64 val)
+{
+    return !((((val + 0x4646464646464646) | (val - 0x3030303030303030)) & 0x8080808080808080));
+}
+
+static u32 eight_digits_to_value(u64 val)
+{
+    const uint64_t mask = 0x000000FF000000FF;
+    const uint64_t mul1 = 0x000F424000000064; // 100 + (1000000ULL << 32)
+    const uint64_t mul2 = 0x0000271000000001; // 1 + (10000ULL << 32)
+    val -= 0x3030303030303030;
+    val = (val * 10) + (val >> 8); // val = (val * 2561) >> 8;
+    val = (((val & mask) * mul1) + (((val >> 16) & mask) * mul2)) >> 32;
+    return uint32_t(val);
+}
+#endif
+
+#define FAIL_PARSE(message, ...) ({ result; })
+
+template<Integral I, bool CheckDigits = true>
+static void fast_parse_decimal(char const*& head, char const* end, I& value)
+{
+#ifdef PARSE_8_AT_A_TIME
+    while ((end - head > 8) && (!CheckDigits || has_eight_digits(read_eight_digits(head)))) {
+        value = 100'000'000 * value + eight_digits_to_value(read_eight_digits(head));
+        head += 8;
+    }
+#endif
+
+    while (head != end && (!CheckDigits || is_ascii_digit(*head))) {
+        value = 10 * value + (*head - '0');
+        ++head;
+    }
+}
 
 static BasicParseResult parse_numbers(char const* ptr, char const* end)
 {
     StringView view { ptr, static_cast<size_t>(end - ptr) };
     BasicParseResult result;
-
-    char decimal_separator = '.';
 
     result.negative = false;
 
@@ -217,37 +262,31 @@ static BasicParseResult parse_numbers(char const* ptr, char const* end)
 
         if (ptr == end)
             return FAIL_PARSE("only -");
-        if (!is_ascii_digit(*ptr) && *ptr != decimal_separator)
+        if (!is_ascii_digit(*ptr) && *ptr != floating_point_decimal_separator)
             return FAIL_PARSE("got {} after -", *ptr);
     } else if (*ptr == '+') {
         ++ptr;
 
         if (ptr == end)
             return FAIL_PARSE("only +");
-        if (!is_ascii_digit(*ptr) && *ptr != decimal_separator)
+        if (!is_ascii_digit(*ptr) && *ptr != floating_point_decimal_separator)
             return FAIL_PARSE("got {} after +", *ptr);
     }
 
     u64 mantissa = 0;
     // FIXME: Add cool parse 4/8 digits at a time!
     auto const* whole_part_start = ptr;
-    while (ptr != end && is_ascii_digit(*ptr)) {
-        mantissa = 10 * mantissa + (*ptr - '0');
-        ++ptr;
-    }
+    fast_parse_decimal(ptr, end, mantissa);
     auto const* whole_part_end = ptr;
     auto digits_found = whole_part_end - whole_part_start;
     result.whole_part = StringView(whole_part_start, digits_found);
 
     i64 exponent = 0;
     auto const* start_of_fractional_part = ptr;
-    if (ptr != end && *ptr == decimal_separator) {
+    if (ptr != end && *ptr == floating_point_decimal_separator) {
         ++ptr;
         ++start_of_fractional_part;
-        while (ptr != end && is_ascii_digit(*ptr)) {
-            mantissa = 10 * mantissa + (*ptr - '0');
-            ++ptr;
-        }
+        fast_parse_decimal(ptr, end, mantissa);
 
         // We parsed x digits after the dot so need to multiply with 10^-x
         exponent = -(ptr - start_of_fractional_part);
@@ -276,9 +315,11 @@ static BasicParseResult parse_numbers(char const* ptr, char const* end)
             return FAIL_PARSE("nothing after e[+-]");
         }
 
+        // FIXME: Make sure that no digit is incorrect / gives the value up to the e
+
         while (ptr != end && is_ascii_digit(*ptr)) {
-            // WARNING CHECK OVERFLOW
-            explicit_exponent = 10 * explicit_exponent + (*ptr - '0');
+            if (explicit_exponent < 0x10000000)
+                explicit_exponent = 10 * explicit_exponent + (*ptr - '0');
             ++ptr;
         }
 
@@ -287,7 +328,7 @@ static BasicParseResult parse_numbers(char const* ptr, char const* end)
     }
 
     result.valid = true;
-    result.end = ptr;
+    result.last_parsed = ptr;
 
     if (digits_found > max_representable_power_of_ten_in_u64) {
         // Oh oh we might have overflown mantissa....
@@ -299,14 +340,22 @@ static BasicParseResult parse_numbers(char const* ptr, char const* end)
             ++leading_digit;
         }
 
-        // If that didn't get use back we need to be more careful when adding
         if (digits_found > max_representable_power_of_ten_in_u64) {
+
             result.more_than_19_digits_with_overflow = true;
             // Just truncate to upper 19 digits
 
             mantissa = 0;
             constexpr i64 smallest_nineteen_digit_number = { 1000000000000000000 };
             char const* reparse_ptr = whole_part_start;
+
+#ifdef PARSE_8_AT_A_TIME
+            constexpr i64 smallest_eleven_digit_number = { 10000000000 };
+            while (mantissa < smallest_eleven_digit_number && (whole_part_end - reparse_ptr) >= 8) {
+                mantissa = 100'000'000 * mantissa + eight_digits_to_value(read_eight_digits(reparse_ptr));
+                reparse_ptr += 8;
+            }
+#endif
 
             while (mantissa < smallest_nineteen_digit_number && reparse_ptr != whole_part_end) {
                 mantissa = 10 * mantissa + (*reparse_ptr - '0');
@@ -319,6 +368,14 @@ static BasicParseResult parse_numbers(char const* ptr, char const* end)
             } else {
                 reparse_ptr = start_of_fractional_part;
                 char const* fractional_end = result.fractional_part.characters_without_null_termination() + result.fractional_part.length();
+
+#ifdef PARSE_8_AT_A_TIME
+                while (mantissa < smallest_eleven_digit_number && (fractional_end - reparse_ptr) >= 8) {
+                    mantissa = 100'000'000 * mantissa + eight_digits_to_value(read_eight_digits(reparse_ptr));
+                    reparse_ptr += 8;
+                }
+#endif
+
                 while (mantissa < smallest_nineteen_digit_number && reparse_ptr != fractional_end) {
                     mantissa = 10 * mantissa + (*reparse_ptr - '0');
                     ++reparse_ptr;
@@ -331,8 +388,6 @@ static BasicParseResult parse_numbers(char const* ptr, char const* end)
         }
     }
 
-    //    dbgln("Got mantissa: {}, exponent: {} [{}], negtaive: {}", mantissa, exponent, explicit_exponent, result.negative);
-
     result.mantissa = mantissa;
     result.exponent = exponent;
     return result;
@@ -340,12 +395,11 @@ static BasicParseResult parse_numbers(char const* ptr, char const* end)
 
 #undef FAIL_PARSE
 
-#define FAIL_AND_NAN ({ dbgln("FAIL!"); __builtin_nan(""); })
-constexpr u4096 bit128 = u4096 { 1u } << 127u;
-constexpr u4096 bit129 = u4096 { 1u } << 128u;
-
-constexpr static u128 compute_power_of_five(i64 exponent)
+// FIXME: Figure out if this can be fast enough for constexpr (with massive limits takes 30+ seconds...)
+[[maybe_unused]] constexpr static u128 compute_power_of_five(i64 exponent)
 {
+    constexpr u4096 bit128 = u4096 { 1u } << 127u;
+    constexpr u4096 bit129 = u4096 { 1u } << 128u;
 
     VERIFY(exponent <= 308);
     VERIFY(exponent >= -342);
@@ -355,18 +409,11 @@ constexpr static u128 compute_power_of_five(i64 exponent)
         for (auto i = 0u; i < exponent; ++i) {
             base *= 5u;
         }
-        //        auto low = base.low();
-        //        auto shift = low.clz();
-        //        auto normalized_low = low << shift;
-
-        //        dbgln("for {} got: {}", exponent, base);
 
         while (base < bit128)
             base <<= 1u;
         while (base >= bit129)
             base >>= 1u;
-
-        //        dbgln("truncated to {}", exponent, base);
 
         return base.low().low().low().low().low();
     }
@@ -378,12 +425,9 @@ constexpr static u128 compute_power_of_five(i64 exponent)
             base *= 5u;
         }
 
-        //        unsigned z = 1;
-        //        u4096 bb{1u};
-        //        while ((bb << z) < base) ++z;
         auto z = u4096::my_size() * 8
             - base.clz();
-        //        dbgln("got {} vs {} ({} [{}] - {})", z, u4096::my_size() * 8 - base.clz(), u4096::my_size(), u4096::my_size() * 8, base.clz());
+
         auto b = z + 127;
         u4096 base2 { 1u };
         for (auto i = 0u; i < b; ++i) {
@@ -393,7 +437,7 @@ constexpr static u128 compute_power_of_five(i64 exponent)
         base2 /= base;
         base2 += 1u;
 
-        return base2.low().low().low().low().low();
+        return u128 { base2 };
     }
 
     VERIFY(exponent <= 342);
@@ -420,7 +464,7 @@ constexpr static u128 compute_power_of_five(i64 exponent)
     while (base2 >= bit129)
         base2 >>= 1u;
 
-    return base2.low().low().low().low().low();
+    return u128 { base2 };
 }
 
 static constexpr i64 lowest_exponent = -342;
@@ -1147,7 +1191,6 @@ struct DoubleBuilder {
     template<typename T>
     T to_value(bool is_negative) const
     {
-        //    dbgln("building double from m: {:016x}, p: {} -> {:016x}, negative: {}", mantissa, exponent, u64(exponent), is_negative);
         // FIXME: Change these VERIFYs??
         if constexpr (IsSame<double, T>) {
             VERIFY((mantissa & 0xffe0'0000'0000'0000) == 0);
@@ -1169,7 +1212,21 @@ static DoubleBuilder parse_arbitrarily_long_floating_point(BasicParseResult& res
 
 static i32 decimal_exponent_to_binary_exponent(i32 exponent)
 {
-    return (((217706 * exponent) >> 16) + 63);
+    return ((((152170 + 65536) * exponent) >> 16) + 63);
+}
+
+static u128 multiply(u64 a, u64 b)
+{
+#ifdef __SIZEOF_INT128__
+    unsigned __int128 result = (unsigned __int128)a * b;
+    u64 low = result;
+    u64 high = result >> 64;
+    return u128 { low, high };
+#else
+    // FIXME: We have to do weird things here to get the wide multiply and not the
+    //        slow operator*, is there a better way to do this?
+    return u128 { a }.wide_multiply(u128 { b }).low;
+#endif
 }
 
 template<unsigned Precision>
@@ -1180,9 +1237,10 @@ u128 multiplication_approximation(u64 value, i32 exponent)
     static_assert(Precision < 64);
     constexpr u64 mask = NumericLimits<u64>::max() >> Precision;
 
-    u128 lower_result = u128 { z.high() } * value;
+    auto lower_result = multiply(z.high(), value);
+
     if ((lower_result.high() & mask) == mask) {
-        u128 upper_result = u128 { z.low() } * value;
+        auto upper_result = multiply(z.low(), value);
         lower_result.low() += upper_result.high();
         if (upper_result.high() > lower_result.low()) {
             ++lower_result.high();
@@ -1244,22 +1302,16 @@ static DoubleBuilder binary_to_decimal(u64 mantissa, i64 exponent)
     // We need at least mantissa bits + 1 for the implicit bit + 1 for the implicit 0 top bit and one extra for rounding
     u128 approximation_of_product_with_power_of_five = multiplication_approximation<FloatingPointRepr::mantissa_bits() + 3>(w, exponent);
 
-    if (approximation_of_product_with_power_of_five.low() == 0xffff'ffff'ffff'ffff) {
-        // FIXME: Find just a single test case hitting this!!
-        VERIFY(!"low ffff...");
-
-        // if z mod 2^64 = 2^64 − 1 and q \not\in [−27, 55] then Abort end if
-        if (exponent < -27 || exponent > 55)
-            return not_enough_precision_binary_to_decimal<T>(exponent, approximation_of_product_with_power_of_five.high(), leading_zeros);
-    }
+    // The paper (and code of fastfloat/fast_float as of writing) mention that the low part
+    // of approximation_of_product_with_power_of_five can be 2^64 - 1 here in which case we need more
+    // precision if the exponent lies outside of [-27, 55]. However the authors of the paper have
+    // shown that this case cannot actually occur. See https://github.com/fastfloat/fast_float/issues/146#issuecomment-1262527329
 
     // WE seem to need it because of the extra bit for rounding
     u8 upperbit = approximation_of_product_with_power_of_five.high() >> 63;
     auto m = approximation_of_product_with_power_of_five.high() >> (upperbit + 64 - FloatingPointRepr::mantissa_bits() - 3);
-    //    dbgln("z high {:016x} -> {:016x} and upper {}", lower_result.high(), m, upperbit);
 
-    // We immediately normalize the exponent to 0 - 4095 else we have to add 1022 in a bunch of
-    // calculations later
+    // We immediately normalize the exponent to 0 - max else we have to add the bias in most following calculations
     i32 p = decimal_exponent_to_binary_exponent(exponent) - leading_zeros + upperbit + FloatingPointRepr::exponent_bias();
 
     if (p <= 0) {
@@ -1310,60 +1362,57 @@ static DoubleBuilder binary_to_decimal(u64 mantissa, i64 exponent)
         m, p
     };
 }
-
-template<typename T>
-T parse_floating_point(StringView view)
-{
-    static_assert(IsFloatingPoint<T> && (sizeof(T) == sizeof(u32) || sizeof(T) == sizeof(u64)));
-    using FloatingPointRepr = FloatingPointInfo<T>;
-
-    if (view.is_empty()) {
-        T2ODO("empty view");
-        return __builtin_nan("");
-    }
-
-    char const* ptr = view.characters_without_null_termination();
-    char const* end = ptr + view.length();
-
-    auto result = parse_numbers(ptr, end);
-    if (!result.valid) {
-        T2ODO("invalid number parse");
-        return __builtin_nan("");
-    }
-
-    if (result.mantissa <= u64(2) << FloatingPointRepr::mantissa_bits()
-        && result.exponent >= -FloatingPointRepr::max_exact_power_of_10() && result.exponent <= FloatingPointRepr::max_exact_power_of_10()
-        && !result.more_than_19_digits_with_overflow) {
-
-        T value = result.mantissa;
-        VERIFY(u64(value) == result.mantissa);
-
-        if (result.exponent < 0)
-            value = value / FloatingPointRepr::power_of_ten(-result.exponent);
-        else
-            value = value * FloatingPointRepr::power_of_ten(result.exponent);
-
-        if (result.negative)
-            value = -value;
-
-        return value;
-    }
-
-    auto floating_point_parts = binary_to_decimal<T>(result.mantissa, result.exponent);
-    if (result.more_than_19_digits_with_overflow && floating_point_parts.exponent >= 0) {
-        auto rounded_up_double_build = binary_to_decimal<T>(result.mantissa + 1, result.exponent);
-        if (floating_point_parts.mantissa != rounded_up_double_build.mantissa || floating_point_parts.exponent != rounded_up_double_build.exponent) {
-            floating_point_parts = fallback_binary_to_decimal<T>(result.mantissa, result.exponent);
-        }
-    }
-
-    if (floating_point_parts.exponent < 0) {
-        // Invalid have to parse perfectly
-        floating_point_parts = parse_arbitrarily_long_floating_point<T>(result, floating_point_parts);
-    }
-
-    return floating_point_parts.template to_value<T>(result.negative);
-}
+//
+// template<typename T>
+// T parse_floating_point(StringView view)
+//{
+//    static_assert(IsFloatingPoint<T> && (sizeof(T) == sizeof(u32) || sizeof(T) == sizeof(u64)));
+//    using FloatingPointRepr = FloatingPointInfo<T>;
+//
+//    if (view.is_empty()) {
+//        return __builtin_nan("");
+//    }
+//
+//    char const* ptr = view.characters_without_null_termination();
+//    char const* end = ptr + view.length();
+//
+//    auto result = parse_numbers(ptr, end);
+//    if (!result.valid)
+//        return __builtin_nan("");
+//
+//    if (result.mantissa <= u64(2) << FloatingPointRepr::mantissa_bits()
+//        && result.exponent >= -FloatingPointRepr::max_exact_power_of_10() && result.exponent <= FloatingPointRepr::max_exact_power_of_10()
+//        && !result.more_than_19_digits_with_overflow) {
+//
+//        T value = result.mantissa;
+//        VERIFY(u64(value) == result.mantissa);
+//
+//        if (result.exponent < 0)
+//            value = value / FloatingPointRepr::power_of_ten(-result.exponent);
+//        else
+//            value = value * FloatingPointRepr::power_of_ten(result.exponent);
+//
+//        if (result.negative)
+//            value = -value;
+//
+//        return value;
+//    }
+//
+//    auto floating_point_parts = binary_to_decimal<T>(result.mantissa, result.exponent);
+//    if (result.more_than_19_digits_with_overflow && floating_point_parts.exponent >= 0) {
+//        auto rounded_up_double_build = binary_to_decimal<T>(result.mantissa + 1, result.exponent);
+//        if (floating_point_parts.mantissa != rounded_up_double_build.mantissa || floating_point_parts.exponent != rounded_up_double_build.exponent) {
+//            floating_point_parts = fallback_binary_to_decimal<T>(result.mantissa, result.exponent);
+//        }
+//    }
+//
+//    if (floating_point_parts.exponent < 0) {
+//        // Invalid have to parse perfectly
+//        floating_point_parts = parse_arbitrarily_long_floating_point<T>(result, floating_point_parts);
+//    }
+//
+//    return floating_point_parts.template to_value<T>(result.negative);
+//}
 
 static u64 multiply_with_carry(u64 x, u64 y, u64& carry)
 {
@@ -1391,50 +1440,108 @@ public:
     {
         size_t current_word_counter = 0;
         // 10**19 is the biggest power of ten which fits in 64 bit
-        constexpr size_t max_word_counter = 19;
+        constexpr size_t max_word_counter = max_representable_power_of_ten_in_u64;
 
         u64 current_word = 0;
 
-        auto add_digit = [&](char c) {
-            // We can already assume it contains just digits
-            VERIFY(c >= '0' && c <= '9');
-            current_word = current_word * 10 + (c - '0');
+        enum AddDigitResult {
+            DidNotHitMaxDigits,
+            HitMaxDigits,
+        };
 
-            ++digits_parsed;
-            ++current_word_counter;
+        auto does_truncate_non_zero = [](char const* parse_head, char const* parse_end) {
+#ifdef PARSE_8_AT_A_TIME
+            while (parse_end - parse_head >= 8) {
+                static_assert('0' == 0x30);
+
+                if (read_eight_digits(parse_head) != 0x3030303030303030)
+                    return true;
+
+                parse_head += 8;
+            }
+#endif
+
+            while (parse_head != parse_end) {
+                if (*parse_head != '0')
+                    return true;
+
+                ++parse_head;
+            }
+
+            return false;
         };
 
         MinimalBigInt value;
-        auto add_digits = [&](StringView digits) {
-            size_t index = 0;
+        auto add_digits = [&](StringView digits, bool check_fraction_for_truncation = false) {
+            char const* parse_head = digits.characters_without_null_termination();
+            char const* parse_end = digits.characters_without_null_termination() + digits.length();
+
             if (digits_parsed == 0) {
-                while (index < digits.length() && digits[index] == '0')
-                    ++index;
+                // Skip all leading zeros as long as we haven't hit a non zero
+                while (parse_head != parse_end && *parse_head == '0')
+                    ++parse_head;
             }
 
-            while (index < digits.length()) {
+            while (parse_head != parse_end) {
+#ifdef PARSE_8_AT_A_TIME
+                while (max_word_counter - current_word_counter >= 8
+                    && parse_end - parse_head >= 8
+                    && max_total_digits - digits_parsed >= 8) {
+
+                    current_word = current_word * 100'000'000 + eight_digits_to_value(read_eight_digits(parse_head));
+
+                    digits_parsed += 8;
+                    current_word_counter += 8;
+                    parse_head += 8;
+                }
+#endif
+
                 while (current_word_counter < max_word_counter
-                    && index < digits.length()
+                    && parse_head != parse_end
                     && digits_parsed < max_total_digits) {
 
-                    add_digit(digits[index]);
-                    ++index;
+                    current_word = current_word * 10 + (*parse_head - '0');
+
+                    ++digits_parsed;
+                    ++current_word_counter;
+                    ++parse_head;
                 }
 
                 if (digits_parsed == max_total_digits) {
-                    VERIFY(!"REACHED MAX DIGITS");
+                    // Check if we are leaving behind any non zero
+                    bool truncated = does_truncate_non_zero(parse_head, parse_end);
+                    if (auto fraction = parse_result.fractional_part; check_fraction_for_truncation && !fraction.is_empty())
+                        truncated = truncated || does_truncate_non_zero(fraction.characters_without_null_termination(), fraction.characters_without_null_termination() + fraction.length());
+
+                    // If we truncated we just pretend there is another 1 after the already parsed digits
+
+                    if (truncated && current_word_counter != max_word_counter) {
+                        // If it still fits in the current add it there, this saves a wide multiply
+                        current_word = current_word * 10 + 1;
+                        ++current_word_counter;
+                        truncated = false;
+                    }
+                    value.add_digits(current_word, current_word_counter);
+
+                    // If it didn't fit just do * 10 + 1
+                    if (truncated)
+                        value.add_digits(1, 1);
+
+                    return HitMaxDigits;
                 } else {
                     value.add_digits(current_word, current_word_counter);
                     current_word = 0;
                     current_word_counter = 0;
                 }
             }
+
+            return DidNotHitMaxDigits;
         };
 
-        add_digits(parse_result.whole_part);
-        add_digits(parse_result.fractional_part);
+        if (add_digits(parse_result.whole_part, true) == HitMaxDigits)
+            return value;
 
-        VERIFY(current_word_counter == 0);
+        add_digits(parse_result.fractional_part);
 
         return value;
     }
@@ -1445,7 +1552,6 @@ public:
         if (m_used_length == 0)
             return 0;
         // Top word should be non-zero
-        //        dbgln("words: {} last word {:016x} [{1}]", m_used_length, m_words[m_used_length - 1]);
         VERIFY(m_words[m_used_length - 1] != 0);
 
         auto leading_zeros = count_leading_zeroes(m_words[m_used_length - 1]);
@@ -1474,7 +1580,6 @@ public:
     {
         if (m_used_length == 0)
             return 0;
-        //        dbgln("{} words in used, {} leading zeros on top", m_used_length, count_leading_zeroes(m_words[m_used_length - 1]));
         // This is guaranteed to be at most max_size_in_words * 64 so not above i32 max
         return static_cast<i32>(64 * (m_used_length)-count_leading_zeroes(m_words[m_used_length - 1]));
     }
@@ -1612,19 +1717,12 @@ private:
         1000000000000000000UL, 10000000000000000000UL
     };
 
-    //    static constexpr Array<u32, 10> powers_of_ten_u32 = {
-    //        1UL, 10UL, 100UL, 1000UL, 10000UL, 100000UL, 1000000UL, 10000000UL, 100000000UL,
-    //        1000000000UL};
-
     void multiply_with_small(u64 value)
     {
         u64 carry = 0;
-        for (size_t i = 0; i < m_used_length; ++i) {
-            //            dbgln("have carry {} going into {} --> {2:016x} [{2}]", carry, i, m_words[i]);
+        for (size_t i = 0; i < m_used_length; ++i)
             m_words[i] = multiply_with_carry(m_words[i], value, carry);
-        }
 
-        //        dbgln("got carry out: {}", carry);
         if (carry != 0)
             append(carry);
     }
@@ -1648,7 +1746,6 @@ private:
     {
         VERIFY(digits_for_value < powers_of_ten_uint64.size());
 
-        //        dbgln("multiplying with {}", powers_of_ten_uint64[digits_for_value]);
         multiply_with_small(powers_of_ten_uint64[digits_for_value]);
         add_small(value);
     }
@@ -1785,12 +1882,16 @@ static DoubleBuilder build_negative_exponent_double(MinimalBigInt& mantissa, i32
     auto compared_to_halfway = mantissa.compare_to(rounded_down_full_mantissa);
 
     round<T>(initial, [compared_to_halfway](DoubleBuilder& value, i32 shift) {
-        value.mantissa >>= shift;
+        if (shift == 64) {
+            value.mantissa = 0;
+        } else {
+            value.mantissa >>= shift;
+        }
         value.exponent += shift;
 
         if (compared_to_halfway == MinimalBigInt::CompareResult::GreaterThan)
             return true;
-        else if (compared_to_halfway == MinimalBigInt::CompareResult::LessThan)
+        if (compared_to_halfway == MinimalBigInt::CompareResult::LessThan)
             return false;
 
         return (value.mantissa & 1) == 1;
@@ -1833,15 +1934,303 @@ static DoubleBuilder parse_arbitrarily_long_floating_point(BasicParseResult& res
     return build_negative_exponent_double<T>(mantissa, exponent, initial);
 }
 
-// We only instantiate double and float
-double parse_double(StringView view)
+template<FloatingPoint T>
+FloatingPointParseResults<T> parse_first_floating_point(char const* start, char const* end)
 {
-    return parse_floating_point<double>(view);
+    using FloatingPointRepr = FloatingPointInfo<T>;
+    auto parse_result = parse_numbers(start, end);
+
+    if (!parse_result.valid)
+        return { nullptr, FloatingPointError::NoOrInvalidInput, __builtin_nan("") };
+
+    FloatingPointParseResults<T> full_result {};
+    full_result.end_ptr = parse_result.last_parsed;
+
+    // We special case this to be able to differentiate between 0 and values rounded down to 0
+
+    if (parse_result.mantissa == 0) {
+        full_result.value = parse_result.negative ? -0. : 0.;
+        return full_result;
+    }
+
+    if (parse_result.mantissa <= u64(2) << FloatingPointRepr::mantissa_bits()
+        && parse_result.exponent >= -FloatingPointRepr::max_exact_power_of_10() && parse_result.exponent <= FloatingPointRepr::max_exact_power_of_10()
+        && !parse_result.more_than_19_digits_with_overflow) {
+
+        full_result.value = parse_result.mantissa;
+        VERIFY(u64(full_result.value) == parse_result.mantissa);
+
+        if (parse_result.exponent < 0)
+            full_result.value = full_result.value / FloatingPointRepr::power_of_ten(-parse_result.exponent);
+        else
+            full_result.value = full_result.value * FloatingPointRepr::power_of_ten(parse_result.exponent);
+
+        if (parse_result.negative)
+            full_result.value = -full_result.value;
+
+        return full_result;
+    }
+
+    auto floating_point_parts = binary_to_decimal<T>(parse_result.mantissa, parse_result.exponent);
+    if (parse_result.more_than_19_digits_with_overflow && floating_point_parts.exponent >= 0) {
+        auto rounded_up_double_build = binary_to_decimal<T>(parse_result.mantissa + 1, parse_result.exponent);
+        if (floating_point_parts.mantissa != rounded_up_double_build.mantissa || floating_point_parts.exponent != rounded_up_double_build.exponent) {
+            floating_point_parts = fallback_binary_to_decimal<T>(parse_result.mantissa, parse_result.exponent);
+        }
+    }
+
+    if (floating_point_parts.exponent < 0) {
+        // Invalid have to parse perfectly
+        floating_point_parts = parse_arbitrarily_long_floating_point<T>(parse_result, floating_point_parts);
+    }
+
+    full_result.value = floating_point_parts.template to_value<T>(parse_result.negative);
+
+    if (floating_point_parts.exponent == FloatingPointRepr::infinity_exponent()) {
+        VERIFY(floating_point_parts.mantissa == 0);
+        full_result.error = FloatingPointError::OutOfRange;
+    } else if (floating_point_parts.mantissa == 0 && floating_point_parts.exponent == 0) {
+        full_result.error = FloatingPointError::RoundedDownToZero;
+    }
+
+    return full_result;
 }
 
-float parse_float(StringView view)
+template FloatingPointParseResults<double> parse_first_floating_point(char const* start, char const* end);
+
+template FloatingPointParseResults<float> parse_first_floating_point(char const* start, char const* end);
+
+template<FloatingPoint T>
+Optional<T> parse_floating_point_completely(StringView view)
 {
-    return parse_floating_point<float>(view);
+    char const* end_of_string = view.characters_without_null_termination() + view.length();
+    // FIXME: Catch parse failure (not until the end) earlier and return
+    auto parse_result = parse_first_floating_point<T>(view.characters_without_null_termination(), end_of_string);
+    if (parse_result.error != FloatingPointError::NoOrInvalidInput && parse_result.end_ptr == end_of_string)
+        return parse_result.value;
+
+    return {};
 }
+
+template Optional<double> parse_floating_point_completely(StringView view);
+
+template Optional<float> parse_floating_point_completely(StringView view);
+
+struct HexFloatParseResult {
+    bool is_negative = false;
+    bool valid = false;
+    char const* last_parsed = nullptr;
+    u64 mantissa = 0;
+    i64 exponent = 0;
+};
+
+static HexFloatParseResult parse_hexfloat(char const* start, char const* end)
+{
+    HexFloatParseResult result {};
+    if (start == end) {
+        return result;
+    }
+    char const* parse_head = start;
+    bool any_digits = false;
+    bool truncated_non_zero = false;
+
+    if (*parse_head == '-') {
+        result.is_negative = true;
+        ++parse_head;
+
+        if (parse_head == end || (!is_ascii_hex_digit(*parse_head) && *parse_head != floating_point_decimal_separator))
+            return result;
+    } else if (*parse_head == '+') {
+        ++parse_head;
+
+        if (parse_head == end || (!is_ascii_hex_digit(*parse_head) && *parse_head != floating_point_decimal_separator))
+            return result;
+    }
+    if (*parse_head == '0' && (parse_head + 1 != end) && (*(parse_head + 1) == 'x' || *(parse_head + 1) == 'X')) {
+        // Skip potential 0[xX]
+        parse_head += 2;
+    }
+
+    auto add_mantissa_digit = [&] {
+        any_digits = true;
+
+        // We assume you already checked this is actually a digit
+        auto digit = parse_ascii_hex_digit(*parse_head);
+
+        // We only need to store the top ~53 bits and remember if we ever hit non-zero after that
+        if (result.mantissa < (1ull << 60)) {
+            result.mantissa = (result.mantissa * 16) + digit;
+            return true;
+        }
+
+        if (digit != 0) {
+            truncated_non_zero = true;
+        }
+
+        return false;
+    };
+
+    while (parse_head != end && is_ascii_hex_digit(*parse_head)) {
+        add_mantissa_digit();
+
+        ++parse_head;
+    }
+
+    if (parse_head != end && *parse_head == floating_point_decimal_separator) {
+        ++parse_head;
+        i64 digits_after_separator = 0;
+        while (parse_head != end && is_ascii_hex_digit(*parse_head)) {
+            // Track how many characters we actually read into the mantissa
+            digits_after_separator += add_mantissa_digit() ? 1 : 0;
+
+            ++parse_head;
+        }
+
+        // We parsed x digits after the dot so need to multiply with 2^(-x * 4)
+        // Since every digit is 4 bits
+        result.exponent = -digits_after_separator * 4;
+    }
+
+    if (!any_digits)
+        return result;
+
+    if (parse_head != end && (*parse_head == 'p' || *parse_head == 'P')) {
+        ++parse_head;
+        bool exponent_is_negative = false;
+        i64 explicit_exponent = 0;
+
+        if (parse_head != end && *parse_head == '-') {
+            exponent_is_negative = true;
+            ++parse_head;
+        } else if (parse_head != end && *parse_head == '+') {
+            ++parse_head;
+        }
+
+        // FIXME: Check next value is digit and fail otherwise
+
+        while (parse_head != end && is_ascii_hex_digit(*parse_head)) {
+            if (explicit_exponent < 0x10000000) {
+                explicit_exponent = 10 * explicit_exponent + (*parse_head - '0');
+            }
+            ++parse_head;
+        }
+
+        if (exponent_is_negative)
+            explicit_exponent = -explicit_exponent;
+
+        result.exponent += explicit_exponent;
+    }
+
+    result.valid = true;
+
+    // Round up exactly halfway with trunctated non zeros, but don't if it would cascade up
+    if (truncated_non_zero && (result.mantissa & 0xF) != 0xF) {
+        VERIFY(result.mantissa >= 0x1000'0000'0000'0000);
+        result.mantissa |= 1;
+    }
+
+    result.last_parsed = parse_head;
+
+    return result;
+}
+
+template<FloatingPoint T>
+static DoubleBuilder build_hex_float(HexFloatParseResult& parse_result)
+{
+    using FloatingPointRepr = FloatingPointInfo<T>;
+    VERIFY(parse_result.mantissa != 0);
+
+    if (parse_result.exponent >= FloatingPointRepr::infinity_exponent())
+        return DoubleBuilder::infinity<T>();
+
+    auto leading_zeros = count_leading_zeroes(parse_result.mantissa);
+    u64 normalized_mantissa = parse_result.mantissa << leading_zeros;
+
+    u8 upperbit = normalized_mantissa >> 63;
+    DoubleBuilder parts;
+    parts.mantissa = normalized_mantissa >> (upperbit + 64 - FloatingPointRepr::mantissa_bits() - 3);
+
+    parts.exponent = parse_result.exponent + upperbit - leading_zeros + FloatingPointRepr::exponent_bias() + 62;
+
+    if (parts.exponent <= 0) {
+        // subnormal
+        if (-parts.exponent + 1 >= 64) {
+            parts.mantissa = 0;
+            parts.exponent = 0;
+            return parts;
+        }
+
+        parts.mantissa >>= -parts.exponent + 1;
+        parts.mantissa += parts.mantissa & 1;
+        parts.mantissa >>= 1;
+
+        if (parts.mantissa < (1ull << FloatingPointRepr::mantissa_bits())) {
+            parts.exponent = 0;
+        } else {
+            parts.exponent = 1;
+        }
+
+        return parts;
+    }
+
+    if ((parts.mantissa & 0b11) == 0b01) {
+        // effectively all discard bits from z.high are 0
+        if (normalized_mantissa == (parts.mantissa << (upperbit + 64 - FloatingPointRepr::mantissa_bits() - 3)))
+            parts.mantissa &= ~u64(1);
+    }
+
+    parts.mantissa += parts.mantissa & 1;
+    parts.mantissa >>= 1;
+
+    if (parts.mantissa >= (2ull << FloatingPointRepr::mantissa_bits())) {
+        parts.mantissa = 1ull << FloatingPointRepr::mantissa_bits();
+        ++parts.exponent;
+    }
+
+    parts.mantissa &= ~(1ull << FloatingPointRepr::mantissa_bits());
+
+    if (parts.exponent >= FloatingPointRepr::infinity_exponent()) {
+        parts.mantissa = 0;
+        parts.exponent = FloatingPointRepr::infinity_exponent();
+    }
+
+    return parts;
+}
+
+template<FloatingPoint T>
+FloatingPointParseResults<T> parse_first_hexfloat(char const* start, char const* end)
+{
+    using FloatingPointRepr = FloatingPointInfo<T>;
+    auto parse_result = parse_hexfloat(start, end);
+
+    if (!parse_result.valid)
+        return { nullptr, FloatingPointError::NoOrInvalidInput, __builtin_nan("") };
+
+    FloatingPointParseResults<T> full_result {};
+    full_result.end_ptr = parse_result.last_parsed;
+
+    // We special case this to be able to differentiate between 0 and values rounded down to 0
+
+    if (parse_result.mantissa == 0) {
+        full_result.value = 0.;
+        return full_result;
+    }
+
+    auto result = build_hex_float<T>(parse_result);
+    full_result.value = result.template to_value<T>(parse_result.is_negative);
+
+    if (result.exponent == FloatingPointRepr::infinity_exponent()) {
+        VERIFY(result.mantissa == 0);
+        full_result.error = FloatingPointError::OutOfRange;
+    } else if (result.mantissa == 0 && result.exponent == 0) {
+        full_result.error = FloatingPointError::RoundedDownToZero;
+    }
+
+    return full_result;
+}
+
+template FloatingPointParseResults<double> parse_first_hexfloat(char const* start, char const* end);
+
+template FloatingPointParseResults<float> parse_first_hexfloat(char const* start, char const* end);
 
 }
