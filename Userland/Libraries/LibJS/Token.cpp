@@ -8,6 +8,7 @@
 #include "Token.h"
 #include <AK/Assertions.h>
 #include <AK/CharacterTypes.h>
+#include <AK/FloatingPointStringConversions.h>
 #include <AK/GenericLexer.h>
 #include <AK/StringBuilder.h>
 
@@ -79,9 +80,7 @@ double Token::double_value() const
                 return static_cast<double>(strtoul(value_string.characters() + 1, nullptr, 8));
         }
     }
-    // FIXME: Don't use strtod to not have locale problems
-    //        Use the new parser instead
-    return strtod(value_string.characters(), nullptr);
+    return parse_floating_point_completely<double>(value_string.view()).value_or(__builtin_nan(""));
 }
 
 static u32 hex2int(char x)
