@@ -397,6 +397,7 @@ void setprogname(char const* progname)
 // https://pubs.opengroup.org/onlinepubs/9699919799/functions/strtod.html
 double strtod(char const* str, char** endptr)
 {
+    // FIXME: Use the new parser :)
     // Parse spaces, sign, and base
     char* parse_ptr = const_cast<char*>(str);
     strtons(parse_ptr, &parse_ptr);
