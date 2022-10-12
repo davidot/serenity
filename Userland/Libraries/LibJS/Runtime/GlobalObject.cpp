@@ -235,7 +235,7 @@ JS_DEFINE_NATIVE_FUNCTION(GlobalObject::parse_float)
 
     bool starts_with_sign = trimmed_string[0] == '-' || trimmed_string[0] == '+';
     auto signless_view = starts_with_sign ? trimmed_string.substring_view(1) : trimmed_string.view();
-    if (signless_view.starts_with("Infinity"sv, AK::CaseSensitivity::CaseInsensitive)) {
+    if (signless_view.starts_with("Infinity"sv, AK::CaseSensitivity::CaseSensitive)) {
         // Only an immediate - means we should return negative infinity
         if (trimmed_string[0] == '-')
             return js_negative_infinity();
