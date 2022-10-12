@@ -224,10 +224,25 @@ static Testcase TESTCASES[] = {
     { "C80", -1, "4025cccccccccccd", "10.900000000000000012345678912345678912345" },
 
     // Hexadecimal floats.
-    // Note that "0x579a" is "0xabcd << 1" with the top bit cut off, just as expected.
-    { "Fp1", -1, "7c2579a000000000", "0xab.cdpef" },
+    // Hex floats do not allow hexadecimal digits in the exponent
+    { "Fp1.1", 7, "406579a000000000", "0xab.cdpef" },
+    { "Fp1.1", 7, "406579a000000000", "0xab.cdp-ef" },
+    { "Fp1.1", 7, "406579a000000000", "0xab.cdpe-f" },
+    { "Fp1.1", 7, "406579a000000000", "0xab.cdpef-" },
+    { "Fp1.2", 11, "7c9579a000000000", "0xab.cdp963" },
+    { "Fp1.3", 12, "7c9579a000000000", "0xab.cdp+963" },
+    { "Fp1.4", 12, "7c2579a000000000", "0xab.cdp+956" },
+    { "Fp1.4", 12, "7c1579a000000000", "0xab.cdp+955" },
+    { "Fp1.5", 12, "04a579a000000000", "0xab.cdp-956" },
     // Sneaky floating point :P
-    { "Fp2", -1, "43e9400000000000", "0xCAPE" },
+    { "Fp2.1", 4, "4069400000000000", "0xCAPE" },
+    { "Fp2.1", 4, "4069400000000000", "0xCAP-E" },
+    { "Fp2.2", 6, "4069400000000000", "0xCAP0" },
+    { "Fp2.2", 7, "4069400000000000", "0xCAP+0" },
+    { "Fp2.2", 7, "4069400000000000", "0xCAP-0" },
+    { "Fp2.3", 7, "4159400000000000", "0xCAP15" },
+    { "Fp2.4", 7, "4459400000000000", "0xCAP63" },
+    { "Fp2.5", 7, "43e9400000000000", "0xCAP56" },
 };
 
 constexpr size_t NUM_TESTCASES = sizeof(TESTCASES) / sizeof(TESTCASES[0]);
@@ -359,13 +374,19 @@ TEST_CASE(strtod_accuracy)
 
 TEST_CASE(test_strtod_sets_errno)
 {
-#define EXPECT_TO_GIVE_VALUE_WITH_0_ERRNO(str_value, double_value) \
-    do {                                                           \
-        errno = 0;                                                 \
-        auto value = strtod(str_value, nullptr);                   \
-        EXPECT_EQ(errno, 0);                                       \
-        EXPECT_EQ(value, static_cast<double>(double_value));       \
+#define EXPECT_TO_GIVE_VALUE_WITH_0_ERRNO_BASE(str_value, double_value)                    \
+    do {                                                                                   \
+        errno = 0;                                                                         \
+        auto value = strtod(str_value, nullptr);                                           \
+        EXPECT_EQ(errno, 0);                                                               \
+        EXPECT_EQ(bit_cast<u64>(value), bit_cast<u64>(static_cast<double>(double_value))); \
     } while (false)
+
+#define EXPECT_TO_GIVE_VALUE_WITH_0_ERRNO(str_value, double_value)        \
+    EXPECT_TO_GIVE_VALUE_WITH_0_ERRNO_BASE(str_value, double_value);      \
+    EXPECT_TO_GIVE_VALUE_WITH_0_ERRNO_BASE("  " str_value, double_value); \
+    EXPECT_TO_GIVE_VALUE_WITH_0_ERRNO_BASE("\t" str_value, double_value); \
+    EXPECT_TO_GIVE_VALUE_WITH_0_ERRNO_BASE("\n" str_value, double_value)
 
     // Leading zeros are allowed
     EXPECT_TO_GIVE_VALUE_WITH_0_ERRNO("0", 0.);
@@ -379,6 +400,13 @@ TEST_CASE(test_strtod_sets_errno)
     EXPECT_TO_GIVE_VALUE_WITH_0_ERRNO("0x.pt", 0.);
     EXPECT_TO_GIVE_VALUE_WITH_0_ERRNO("0x1.p0", 1.);
     EXPECT_TO_GIVE_VALUE_WITH_0_ERRNO("0x1.pa", 1.);
+
+    EXPECT_TO_GIVE_VALUE_WITH_0_ERRNO("-0xT", -0.);
+    EXPECT_TO_GIVE_VALUE_WITH_0_ERRNO("-0xp20", -0.);
+    EXPECT_TO_GIVE_VALUE_WITH_0_ERRNO("-0x.t", -0.);
+    EXPECT_TO_GIVE_VALUE_WITH_0_ERRNO("-0x.pt", -0.);
+    EXPECT_TO_GIVE_VALUE_WITH_0_ERRNO("-0x1.p0", -1.);
+    EXPECT_TO_GIVE_VALUE_WITH_0_ERRNO("-0x1.pa", -1.);
 
     EXPECT_TO_GIVE_VALUE_WITH_0_ERRNO("1", 1.);
     EXPECT_TO_GIVE_VALUE_WITH_0_ERRNO("10e10", 10e10);
@@ -398,13 +426,20 @@ TEST_CASE(test_strtod_sets_errno)
     EXPECT_TO_GIVE_VALUE_WITH_0_ERRNO("-INF", -__builtin_huge_val());
     EXPECT_TO_GIVE_VALUE_WITH_0_ERRNO("-INFINITY", -__builtin_huge_val());
 
-#define EXPECT_TO_GIVE_VALUE_WITH_ERRNO(str_value, double_value, errno_value) \
-    do {                                                                      \
-        errno = 0;                                                            \
-        auto value = strtod(str_value, nullptr);                              \
-        EXPECT_EQ(errno, errno_value);                                        \
-        EXPECT_EQ(value, static_cast<double>(double_value));                  \
+#define EXPECT_TO_GIVE_VALUE_WITH_ERRNO(str_value, double_value, errno_value)              \
+    do {                                                                                   \
+        errno = 0;                                                                         \
+        auto value = strtod(str_value, nullptr);                                           \
+        EXPECT_EQ(errno, errno_value);                                                     \
+        EXPECT_EQ(bit_cast<u64>(value), bit_cast<u64>(static_cast<double>(double_value))); \
     } while (false)
 
     EXPECT_TO_GIVE_VALUE_WITH_ERRNO("nan", __builtin_nan(""), ERANGE);
+    EXPECT_TO_GIVE_VALUE_WITH_ERRNO("10e10000", __builtin_huge_val(), ERANGE);
+    EXPECT_TO_GIVE_VALUE_WITH_ERRNO("0x1p10000", __builtin_huge_val(), ERANGE);
+    EXPECT_TO_GIVE_VALUE_WITH_ERRNO("-10e10000", -__builtin_huge_val(), ERANGE);
+    EXPECT_TO_GIVE_VALUE_WITH_ERRNO("-0x1p10000", -__builtin_huge_val(), ERANGE);
+    EXPECT_TO_GIVE_VALUE_WITH_ERRNO("10e-10000", 0, ERANGE);
+    EXPECT_TO_GIVE_VALUE_WITH_ERRNO("0x1p-10000", 0, ERANGE);
+    EXPECT_TO_GIVE_VALUE_WITH_ERRNO("-0x1p-10000", -0., ERANGE);
 }
